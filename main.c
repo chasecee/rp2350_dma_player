@@ -33,7 +33,7 @@ int main()
         .x_offset = 6, // Adjusted based on working LVGL example
         .y_offset = 0,
         .brightness = 80,
-        .enabled_dma = false, // DMA DISABLED for this test
+        .enabled_dma = true, // DMA RE-ENABLED
         .dma_flush_done_callback = dma_done_callback};
     bsp_co5300_init(&display_info);
     printf("Display initialized (or crashed trying).\n");
@@ -114,11 +114,11 @@ int main()
         for (int y = 0; y < DISPLAY_HEIGHT; y++)
         {
             // Wait for previous DMA transfer to complete
-            // while (!dma_transfer_complete)
-            // {
-            //     sleep_us(10); // Small delay while polling
-            // }
-            // dma_transfer_complete = false; // Reset flag for current transfer
+            while (!dma_transfer_complete)
+            {
+                sleep_us(10); // Small delay while polling
+            }
+            dma_transfer_complete = false; // Reset flag for current transfer
 
             bsp_co5300_flush(line_buffer, DISPLAY_WIDTH);
         }

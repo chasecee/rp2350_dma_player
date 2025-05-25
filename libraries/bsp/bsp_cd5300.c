@@ -52,8 +52,13 @@ static void bsp_co5300_spi_init(void)
 
 void bsp_co5300_dma_callback(void)
 {
-    sleep_us(1);
+    // Wait for SPI to finish transmitting everything from its FIFO
+    while (spi_get_hw(BSP_CO5300_SPI_NUM)->sr & SPI_SSPSR_BSY_BITS)
+        ;
+
+    // sleep_us(1); // Temporarily commenting out sleep_us as well
     gpio_put(BSP_CO5300_CS_PIN, 1);
+    /* Temporarily comment out brightness adjustment in ISR
     if (g_co5300_info->set_brightness_flag)
     {
         g_co5300_info->set_brightness_flag = false;
@@ -70,6 +75,7 @@ void bsp_co5300_dma_callback(void)
         cmd.delay_ms = 0;
         bsp_co5300_tx_cmd(&cmd, 1);
     }
+    */
     g_co5300_info->dma_flush_done_callback();
 }
 
@@ -197,7 +203,7 @@ void bsp_co5300_flush(uint16_t *color, size_t color_len)
         gpio_put(BSP_CO5300_CS_PIN, 0);
         gpio_put(BSP_CO5300_DC_PIN, 1);
         dma_channel_set_trans_count(g_co5300_info->dma_tx_channel, color_len * 2, true);
-        dma_channel_set_read_addr(g_co5300_info->dma_tx_channel, color, true);
+        dma_channel_set_read_addr(g_co5300_info->dma_tx_channel, color, false);
     }
     else
     {
