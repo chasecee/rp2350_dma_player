@@ -1,0 +1,3 @@
+Hello from your sassy SD card!
+This is a test file for rp2350_dma_player.
+If you can read this, your SD card setup is working! 
