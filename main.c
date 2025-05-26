@@ -10,20 +10,22 @@
 // Display dimensions (assuming 466x466 based on README)
 #define DISPLAY_WIDTH 466
 #define DISPLAY_HEIGHT 466
-#define FRAME_WIDTH 200    // Updated for the new frame size
-#define FRAME_HEIGHT 200   // Updated for the new frame size
-#define RED_COLOR 0x00F8   // RGB565 red - Bytes swapped for CO5300
-#define GREEN_COLOR 0xE007 // RGB565 green - Bytes swapped for CO5300
-#define BLUE_COLOR 0x1F00  // RGB565 blue - Bytes swapped for CO5300
+#define FRAME_WIDTH 200         // Updated for the new frame size
+#define FRAME_HEIGHT 200        // Updated for the new frame size
+#define SCALED_FRAME_WIDTH 244  // New: Apparent width of each tile
+#define SCALED_FRAME_HEIGHT 244 // New: Apparent height of each tile
+#define RED_COLOR 0x00F8        // RGB565 red - Bytes swapped for CO5300
+#define GREEN_COLOR 0xE007      // RGB565 green - Bytes swapped for CO5300
+#define BLUE_COLOR 0x1F00       // RGB565 blue - Bytes swapped for CO5300
 #define MAX_FILENAME_LEN 64
 #define MAX_FRAMES 460 // Max number of frames we can list in the manifest
 
 // Glitch effect parameters
-#define MAX_TARGET_GLITCH_PROBABILITY 0.005f      // Max probability for a new glitch block (0.0 to 1.0)
-#define GLITCH_PROBABILITY_PERIOD_SECONDS 1000.0f // Period for the probability sine wave
-#define MAX_GLITCH_LENGTH (FRAME_WIDTH / 2)       // Max horizontal length of a glitch segment (user can change to DISPLAY_WIDTH for full width glitches)
-#define MAX_GLITCH_OFFSET 8                       // Max horizontal offset for sourcing the glitched segment (pixels)
-#define MAX_GLITCH_BLOCK_HEIGHT_LINES 16          // Max number of consecutive lines a glitch block can last
+#define MAX_TARGET_GLITCH_PROBABILITY 0.005f     // Max probability for a new glitch block (0.0 to 1.0)
+#define GLITCH_PROBABILITY_PERIOD_SECONDS 500.0f // Period for the probability sine wave
+#define MAX_GLITCH_LENGTH (FRAME_WIDTH / 3)      // Max horizontal length of a glitch segment (user can change to DISPLAY_WIDTH for full width glitches)
+#define MAX_GLITCH_OFFSET 4                      // Max horizontal offset for sourcing the glitched segment (pixels)
+#define MAX_GLITCH_BLOCK_HEIGHT_LINES 8          // Max number of consecutive lines a glitch block can last
 
 // Static state for an active glitch block
 static int s_glitch_lines_remaining = 0;
@@ -220,8 +222,8 @@ int main()
     }
 
     // Calculate padding for centering the frame
-    const int PADDING_X = (DISPLAY_WIDTH - FRAME_WIDTH) / 2;
-    const int PADDING_Y = (DISPLAY_HEIGHT - FRAME_HEIGHT) / 2;
+    const int PADDING_X = (DISPLAY_WIDTH - SCALED_FRAME_WIDTH) / 2;   // Centering the central scaled tile
+    const int PADDING_Y = (DISPLAY_HEIGHT - SCALED_FRAME_HEIGHT) / 2; // Centering the central scaled tile
 
     // Main animation loop
     int current_frame_index = 0;
@@ -237,6 +239,7 @@ int main()
     FIL frame_fil;
     UINT bytes_read_for_full_frame;
     char current_frame_full_path[MAX_FILENAME_LEN + 8];
+    uint64_t read_start_us, read_end_us; // For profiling
 
     printf("Starting 3x3 tiled animation loop with %d frames (RAM buffered).\n", num_frames);
     while (1)
@@ -254,16 +257,20 @@ int main()
         else
         {
             // Read the entire frame into RAM buffer
+            read_start_us = to_us_since_boot(get_absolute_time());
             fr = f_read(&frame_fil, full_source_frame_buffer, FRAME_HEIGHT * FRAME_WIDTH * sizeof(uint16_t), &bytes_read_for_full_frame);
+            read_end_us = to_us_since_boot(get_absolute_time());
+
             if (fr != FR_OK || bytes_read_for_full_frame != (FRAME_HEIGHT * FRAME_WIDTH * sizeof(uint16_t)))
             {
-                printf("ERROR: Failed to read full frame %s. Read %u bytes, Error: %d. Displaying black.\n", current_frame_full_path, bytes_read_for_full_frame, fr);
+                printf("ERROR: Failed to read full frame %s. Read %u bytes, Error: %d. (Read time: %llu us). Displaying black.\n", current_frame_full_path, bytes_read_for_full_frame, fr, read_end_us - read_start_us);
                 for (int i = 0; i < FRAME_HEIGHT * FRAME_WIDTH; ++i)
                     full_source_frame_buffer[i] = 0; // Fill with black
             }
             else
             {
                 frame_load_success = true;
+                printf("Loaded frame %s in %llu us.\n", current_frame_full_path, read_end_us - read_start_us);
             }
             f_close(&frame_fil); // Close file once buffered
         }
@@ -278,15 +285,33 @@ int main()
         for (int dx = 0; dx < DISPLAY_WIDTH; ++dx)
         {
             int source_x = -1, source_y = -1;
-            // Check if current display pixel (dx, 0) is within the 3x3 tiled area
-            bool in_horizontal_grid = (dx >= (PADDING_X - FRAME_WIDTH) && dx < (PADDING_X + FRAME_WIDTH * 2));
-            bool in_vertical_grid = (0 >= (PADDING_Y - FRAME_HEIGHT) && 0 < (PADDING_Y + FRAME_HEIGHT * 2));
+            // Check if current display pixel (dx, 0) is within the 3x3 tiled area of SCALED frames
+            bool in_horizontal_grid = (dx >= (PADDING_X - SCALED_FRAME_WIDTH) && dx < (PADDING_X + SCALED_FRAME_WIDTH * 2));
+            bool in_vertical_grid = (0 >= (PADDING_Y - SCALED_FRAME_HEIGHT) && 0 < (PADDING_Y + SCALED_FRAME_HEIGHT * 2));
 
             if (in_horizontal_grid && in_vertical_grid)
             {
-                source_x = (dx - (PADDING_X - FRAME_WIDTH)) % FRAME_WIDTH;
-                source_y = (0 - (PADDING_Y - FRAME_HEIGHT)) % FRAME_HEIGHT;
-                cpu_buffer_ptr[dx] = full_source_frame_buffer[source_y * FRAME_WIDTH + source_x];
+                // Calculate position relative to the start of the 3x3 grid of scaled tiles
+                int dx_relative_to_grid_start = dx - (PADDING_X - SCALED_FRAME_WIDTH);
+                int dy_relative_to_grid_start = 0 - (PADDING_Y - SCALED_FRAME_HEIGHT);
+
+                // Determine position within the current SCALED tile
+                int x_in_current_scaled_tile = dx_relative_to_grid_start % SCALED_FRAME_WIDTH;
+                int y_in_current_scaled_tile = dy_relative_to_grid_start % SCALED_FRAME_HEIGHT;
+
+                // Scale down to find corresponding pixel in the original FRAME_WIDTH x FRAME_HEIGHT source
+                source_x = (x_in_current_scaled_tile * FRAME_WIDTH) / SCALED_FRAME_WIDTH;
+                source_y = (y_in_current_scaled_tile * FRAME_HEIGHT) / SCALED_FRAME_HEIGHT;
+
+                // Boundary checks for safety, though scaling down should keep it within bounds if logic is correct
+                if (source_x >= 0 && source_x < FRAME_WIDTH && source_y >= 0 && source_y < FRAME_HEIGHT)
+                {
+                    cpu_buffer_ptr[dx] = full_source_frame_buffer[source_y * FRAME_WIDTH + source_x];
+                }
+                else
+                {
+                    cpu_buffer_ptr[dx] = 0; // Should not happen if logic is correct, black for safety
+                }
             }
             else
             {
@@ -313,14 +338,33 @@ int main()
                 for (int dx = 0; dx < DISPLAY_WIDTH; ++dx)
                 {
                     int source_x = -1, source_y = -1;
-                    bool in_horizontal_grid = (dx >= (PADDING_X - FRAME_WIDTH) && dx < (PADDING_X + FRAME_WIDTH * 2));
-                    bool in_vertical_grid = (display_y_next >= (PADDING_Y - FRAME_HEIGHT) && display_y_next < (PADDING_Y + FRAME_HEIGHT * 2));
+                    // Check if current display pixel (dx, display_y_next) is within the 3x3 tiled area of SCALED frames
+                    bool in_horizontal_grid = (dx >= (PADDING_X - SCALED_FRAME_WIDTH) && dx < (PADDING_X + SCALED_FRAME_WIDTH * 2));
+                    bool in_vertical_grid = (display_y_next >= (PADDING_Y - SCALED_FRAME_HEIGHT) && display_y_next < (PADDING_Y + SCALED_FRAME_HEIGHT * 2));
 
                     if (in_horizontal_grid && in_vertical_grid)
                     {
-                        source_x = (dx - (PADDING_X - FRAME_WIDTH)) % FRAME_WIDTH;
-                        source_y = (display_y_next - (PADDING_Y - FRAME_HEIGHT)) % FRAME_HEIGHT;
-                        cpu_buffer_ptr[dx] = full_source_frame_buffer[source_y * FRAME_WIDTH + source_x];
+                        // Calculate position relative to the start of the 3x3 grid of scaled tiles
+                        int dx_relative_to_grid_start = dx - (PADDING_X - SCALED_FRAME_WIDTH);
+                        int dy_relative_to_grid_start = display_y_next - (PADDING_Y - SCALED_FRAME_HEIGHT);
+
+                        // Determine position within the current SCALED tile
+                        int x_in_current_scaled_tile = dx_relative_to_grid_start % SCALED_FRAME_WIDTH;
+                        int y_in_current_scaled_tile = dy_relative_to_grid_start % SCALED_FRAME_HEIGHT;
+
+                        // Scale down to find corresponding pixel in the original FRAME_WIDTH x FRAME_HEIGHT source
+                        source_x = (x_in_current_scaled_tile * FRAME_WIDTH) / SCALED_FRAME_WIDTH;
+                        source_y = (y_in_current_scaled_tile * FRAME_HEIGHT) / SCALED_FRAME_HEIGHT;
+
+                        // Boundary checks for safety
+                        if (source_x >= 0 && source_x < FRAME_WIDTH && source_y >= 0 && source_y < FRAME_HEIGHT)
+                        {
+                            cpu_buffer_ptr[dx] = full_source_frame_buffer[source_y * FRAME_WIDTH + source_x];
+                        }
+                        else
+                        {
+                            cpu_buffer_ptr[dx] = 0; // Should not happen if logic is correct, black for safety
+                        }
                     }
                     else
                     {
@@ -349,7 +393,7 @@ int main()
             playthroughs_completed_for_current_cycle++;
 
             bool cycle_complete = false;
-            if (num_frames < 25)
+            if (num_frames <= 25)
             { // Short animation
                 if (playthroughs_completed_for_current_cycle >= 2)
                 {
@@ -367,7 +411,7 @@ int main()
             if (cycle_complete)
             {
                 playthroughs_completed_for_current_cycle = 0; // Reset for next cycle
-                sleep_ms(10);                                 // Pause only after the full cycle (1 or 2 playthroughs)
+                sleep_ms(2000);                               // Pause only after the full cycle (1 or 2 playthroughs)
             }
         }
     }
