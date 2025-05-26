@@ -39,7 +39,8 @@ void bsp_co5300_tx_cmd(bsp_co5300_cmd_t *cmds, size_t cmd_len)
 
 static void bsp_co5300_spi_init(void)
 {
-    spi_init(BSP_CO5300_SPI_NUM, 80 * 1000 * 1000);
+    // spi_init(BSP_CO5300_SPI_NUM, 80 * 1000 * 1000); // Original 80 MHz
+    spi_init(BSP_CO5300_SPI_NUM, 50 * 1000 * 1000); // Changed to 50 MHz (datasheet max)
     gpio_set_function(BSP_CO5300_MOSI_PIN, GPIO_FUNC_SPI);
     gpio_set_function(BSP_CO5300_SCLK_PIN, GPIO_FUNC_SPI);
 
@@ -137,7 +138,7 @@ static void bsp_co5300_reg_init(void)
         {.reg = 0x51, .data = (uint8_t[]){0xA0}, .data_bytes = 1, .delay_ms = 0},
         {.reg = 0x20, .data = (uint8_t[]){0x00}, .data_bytes = 0, .delay_ms = 0},
         {.reg = 0x36, .data = (uint8_t[]){0x00}, .data_bytes = 1, 0},
-        {.reg = 0x3A, .data = (uint8_t[]){0x05}, .data_bytes = 1, .delay_ms = 0},
+        {.reg = 0x3A, .data = (uint8_t[]){0x02}, .data_bytes = 1, .delay_ms = 0},
     };
 
     bsp_co5300_tx_cmd(co5300_init_cmds, sizeof(co5300_init_cmds) / sizeof(bsp_co5300_cmd_t));
@@ -182,7 +183,7 @@ void bsp_co5300_set_window(uint16_t x_start, uint16_t y_start, uint16_t x_end, u
     bsp_co5300_tx_cmd(cmds, 3);
 }
 
-void bsp_co5300_flush(uint16_t *color, size_t color_len)
+void bsp_co5300_flush(uint8_t *color, size_t color_len)
 {
     // static uint32_t flush_pixel_sum = 0;
     // flush_pixel_sum += color_len;
@@ -202,14 +203,14 @@ void bsp_co5300_flush(uint16_t *color, size_t color_len)
     {
         gpio_put(BSP_CO5300_CS_PIN, 0);
         gpio_put(BSP_CO5300_DC_PIN, 1);
-        dma_channel_set_trans_count(g_co5300_info->dma_tx_channel, color_len * 2, true);
+        dma_channel_set_trans_count(g_co5300_info->dma_tx_channel, color_len, true);
         dma_channel_set_read_addr(g_co5300_info->dma_tx_channel, color, false);
     }
     else
     {
         gpio_put(BSP_CO5300_CS_PIN, 0);
         gpio_put(BSP_CO5300_DC_PIN, 1);
-        spi_write_blocking(BSP_CO5300_SPI_NUM, (uint8_t *)color, color_len * 2);
+        spi_write_blocking(BSP_CO5300_SPI_NUM, (uint8_t *)color, color_len);
         gpio_put(BSP_CO5300_CS_PIN, 1);
     }
 }

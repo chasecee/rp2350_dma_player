@@ -10,15 +10,20 @@
 // Display dimensions (assuming 466x466 based on README)
 #define DISPLAY_WIDTH 466
 #define DISPLAY_HEIGHT 466
-#define FRAME_WIDTH 200         // Updated for the new frame size
-#define FRAME_HEIGHT 200        // Updated for the new frame size
-#define SCALED_FRAME_WIDTH 244  // New: Apparent width of each tile
-#define SCALED_FRAME_HEIGHT 244 // New: Apparent height of each tile
-#define RED_COLOR 0x00F8        // RGB565 red - Bytes swapped for CO5300
-#define GREEN_COLOR 0xE007      // RGB565 green - Bytes swapped for CO5300
-#define BLUE_COLOR 0x1F00       // RGB565 blue - Bytes swapped for CO5300
+#define FRAME_WIDTH 156         // Updated for the new frame size
+#define FRAME_HEIGHT 156        // Updated for the new frame size
+#define SCALED_FRAME_WIDTH 196  // New: Apparent width of each tile
+#define SCALED_FRAME_HEIGHT 196 // New: Apparent height of each tile
+
+// Updated color definitions for 8-bit RGB332
+#define RED_COLOR 0xE0   // Binary 11100000 (R:111, G:000, B:00)
+#define GREEN_COLOR 0x1C // Binary 00011100 (R:000, G:111, B:00)
+#define BLUE_COLOR 0x03  // Binary 00000011 (R:000, G:000, B:11)
+#define BLACK_COLOR 0x00 // Binary 00000000
+#define WHITE_COLOR 0xFF // Binary 11111111
+
 #define MAX_FILENAME_LEN 64
-#define MAX_FRAMES 460 // Max number of frames we can list in the manifest
+#define MAX_FRAMES 470 // Max number of frames we can list in the manifest
 
 // Glitch effect parameters
 #define MAX_TARGET_GLITCH_PROBABILITY 0.005f     // Max probability for a new glitch block (0.0 to 1.0)
@@ -43,7 +48,7 @@ void dma_done_callback(void)
 }
 
 // Helper function to apply a glitch if one is active or start a new one
-static void apply_glitch_if_active(volatile uint16_t *cpu_buf, volatile uint16_t *dma_buf, float current_glitch_probability)
+static void apply_glitch_if_active(volatile uint8_t *cpu_buf, volatile uint8_t *dma_buf, float current_glitch_probability)
 {
     if (s_glitch_lines_remaining > 0)
     {
@@ -197,12 +202,12 @@ int main()
     if (num_frames == 0)
     {
         printf("No frames loaded from manifest or manifest not found. Halting with error colors.\n");
-        uint16_t error_colors[] = {RED_COLOR, BLUE_COLOR, GREEN_COLOR}; // Added green for manifest error
+        uint8_t error_colors[] = {RED_COLOR, BLUE_COLOR, GREEN_COLOR}; // Using new defines
         int error_color_index = 0;
         while (1)
         {
             bsp_co5300_set_window(0, 0, DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1); // Full screen for error
-            uint16_t error_line_buffer[DISPLAY_WIDTH];                          // Full width for error
+            uint8_t error_line_buffer[DISPLAY_WIDTH];                           // For 8-bit
             for (int i = 0; i < DISPLAY_WIDTH; i++)
             {
                 error_line_buffer[i] = error_colors[error_color_index];
@@ -214,7 +219,7 @@ int main()
                     sleep_us(10);
                 }
                 dma_transfer_complete = false;
-                bsp_co5300_flush(error_line_buffer, DISPLAY_WIDTH); // Full width for error
+                bsp_co5300_flush(error_line_buffer, DISPLAY_WIDTH); // For 8-bit
             }
             error_color_index = (error_color_index + 1) % 3;
             sleep_ms(333);
@@ -228,13 +233,15 @@ int main()
     // Main animation loop
     int current_frame_index = 0;
     int playthroughs_completed_for_current_cycle = 0; // Added for loop logic
-    uint16_t frame_line_buffer_a[DISPLAY_WIDTH];
-    uint16_t frame_line_buffer_b[DISPLAY_WIDTH];
-    volatile uint16_t *cpu_buffer_ptr;
-    volatile uint16_t *dma_buffer_ptr;
+    uint8_t frame_line_buffer_a[DISPLAY_WIDTH];       // For 8-bit
+    uint8_t frame_line_buffer_b[DISPLAY_WIDTH];       // For 8-bit
+    uint8_t frame_line_buffer_c[DISPLAY_WIDTH];       // For 8-bit
+    volatile uint8_t *cpu_buffer_ptr;                 // For 8-bit
+    volatile uint8_t *ready_buffer_ptr;               // For 8-bit
+    volatile uint8_t *dma_buffer_ptr;                 // For 8-bit
 
     // Buffer to hold one entire source frame in RAM
-    static uint16_t full_source_frame_buffer[FRAME_HEIGHT * FRAME_WIDTH];
+    static uint8_t full_source_frame_buffer[FRAME_HEIGHT * FRAME_WIDTH]; // For 8-bit
 
     FIL frame_fil;
     UINT bytes_read_for_full_frame;
@@ -252,20 +259,20 @@ int main()
         {
             printf("ERROR: Failed to open frame file %s. Error: %d. Displaying black.\n", current_frame_full_path, fr);
             for (int i = 0; i < FRAME_HEIGHT * FRAME_WIDTH; ++i)
-                full_source_frame_buffer[i] = 0; // Fill with black
+                full_source_frame_buffer[i] = 0x00; // Fill with black for uint8_t (RGB332 black)
         }
         else
         {
             // Read the entire frame into RAM buffer
             read_start_us = to_us_since_boot(get_absolute_time());
-            fr = f_read(&frame_fil, full_source_frame_buffer, FRAME_HEIGHT * FRAME_WIDTH * sizeof(uint16_t), &bytes_read_for_full_frame);
+            fr = f_read(&frame_fil, full_source_frame_buffer, FRAME_HEIGHT * FRAME_WIDTH * sizeof(uint8_t), &bytes_read_for_full_frame);
             read_end_us = to_us_since_boot(get_absolute_time());
 
-            if (fr != FR_OK || bytes_read_for_full_frame != (FRAME_HEIGHT * FRAME_WIDTH * sizeof(uint16_t)))
+            if (fr != FR_OK || bytes_read_for_full_frame != (FRAME_HEIGHT * FRAME_WIDTH * sizeof(uint8_t)))
             {
                 printf("ERROR: Failed to read full frame %s. Read %u bytes, Error: %d. (Read time: %llu us). Displaying black.\n", current_frame_full_path, bytes_read_for_full_frame, fr, read_end_us - read_start_us);
                 for (int i = 0; i < FRAME_HEIGHT * FRAME_WIDTH; ++i)
-                    full_source_frame_buffer[i] = 0; // Fill with black
+                    full_source_frame_buffer[i] = 0x00; // Fill with black for uint8_t
             }
             else
             {
@@ -275,13 +282,15 @@ int main()
             f_close(&frame_fil); // Close file once buffered
         }
 
-        // --- DMA Double Buffering and Tiling from RAM ---
+        // --- DMA Triple Buffering and Tiling from RAM ---
         bsp_co5300_set_window(0, 0, DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1); // Full screen
 
         cpu_buffer_ptr = frame_line_buffer_a;
-        dma_buffer_ptr = frame_line_buffer_b;
+        ready_buffer_ptr = frame_line_buffer_b;
+        dma_buffer_ptr = frame_line_buffer_c;
+        volatile uint8_t *temp_swap_ptr; // For swapping buffers
 
-        // Prime the first buffer for DMA (display line 0)
+        // Prime the first buffer (line 0) into cpu_buffer_ptr, then move to ready_buffer_ptr
         for (int dx = 0; dx < DISPLAY_WIDTH; ++dx)
         {
             int source_x = -1, source_y = -1;
@@ -310,28 +319,38 @@ int main()
                 }
                 else
                 {
-                    cpu_buffer_ptr[dx] = 0; // Should not happen if logic is correct, black for safety
+                    cpu_buffer_ptr[dx] = 0x00; // Black for uint8_t
                 }
             }
             else
             {
-                cpu_buffer_ptr[dx] = 0; // Black for outside grid
+                cpu_buffer_ptr[dx] = 0x00; // Black for outside grid
             }
         }
+        // Line 0 is in cpu_buffer_ptr, make it ready
+        temp_swap_ptr = cpu_buffer_ptr;
+        cpu_buffer_ptr = ready_buffer_ptr;
+        ready_buffer_ptr = temp_swap_ptr;
+        // Now: ready_buffer_ptr has line 0. cpu_buffer_ptr is free (was frame_line_buffer_b). dma_buffer_ptr is free (frame_line_buffer_c).
 
         for (int y = 0; y < DISPLAY_HEIGHT; y++) // For each line on the DISPLAY
         {
-            volatile uint16_t *temp_buf = dma_buffer_ptr;
-            dma_buffer_ptr = cpu_buffer_ptr;
-            cpu_buffer_ptr = temp_buf;
-
-            while (!dma_transfer_complete)
+            // Wait for the previous DMA transfer to complete
+            while (!dma_transfer_complete) // This will be true after the first line
             {
                 sleep_us(10);
             }
-            dma_transfer_complete = false;
-            bsp_co5300_flush((uint16_t *)dma_buffer_ptr, DISPLAY_WIDTH);
 
+            // Swap dma_buffer_ptr with ready_buffer_ptr to get the line to display
+            // The old dma_buffer_ptr becomes the new ready_buffer_ptr (which is now free)
+            temp_swap_ptr = dma_buffer_ptr;
+            dma_buffer_ptr = ready_buffer_ptr;
+            ready_buffer_ptr = temp_swap_ptr;
+
+            dma_transfer_complete = false;
+            bsp_co5300_flush((uint8_t *)dma_buffer_ptr, DISPLAY_WIDTH); // Send the current line
+
+            // Prepare the next line in cpu_buffer_ptr (if not the last line of display)
             if (y < DISPLAY_HEIGHT - 1)
             {
                 int display_y_next = y + 1;
@@ -363,28 +382,36 @@ int main()
                         }
                         else
                         {
-                            cpu_buffer_ptr[dx] = 0; // Should not happen if logic is correct, black for safety
+                            cpu_buffer_ptr[dx] = 0x00; // Black for uint8_t
                         }
                     }
                     else
                     {
-                        cpu_buffer_ptr[dx] = 0; // Black for outside grid
+                        cpu_buffer_ptr[dx] = 0x00; // Black for outside grid
                     }
                 }
 
-                // --- Glitch Injection Logic --- (Applies to the line *about* to be displayed)
+                // --- Glitch Injection Logic --- (Applies to the line *about* to be prepared for DMA)
                 uint64_t current_time_us_loop = to_us_since_boot(get_absolute_time());
                 float elapsed_seconds_loop = (current_time_us_loop - start_time_us) / 1000000.0f;
                 float current_prob_loop = (MAX_TARGET_GLITCH_PROBABILITY / 2.0f) * (1.0f - cosf(2.0f * M_PI * elapsed_seconds_loop / GLITCH_PROBABILITY_PERIOD_SECONDS));
+                // Apply glitch to cpu_buffer_ptr, using dma_buffer_ptr (which has the line currently being displayed) as a potential source
                 apply_glitch_if_active(cpu_buffer_ptr, dma_buffer_ptr, current_prob_loop);
                 // --- End Glitch Injection Logic ---
+
+                // The line in cpu_buffer_ptr is now ready. Swap it with ready_buffer_ptr (which is free).
+                // The old ready_buffer_ptr becomes the new cpu_buffer_ptr for the next iteration.
+                temp_swap_ptr = cpu_buffer_ptr;
+                cpu_buffer_ptr = ready_buffer_ptr;
+                ready_buffer_ptr = temp_swap_ptr;
             }
         }
+        // Wait for the last line's DMA to complete before starting next frame
         while (!dma_transfer_complete)
         {
             sleep_us(10);
-        } // Wait for last line's DMA
-        // --- End DMA Double Buffering ---
+        }
+        // --- End DMA Triple Buffering ---
 
         current_frame_index = (current_frame_index + 1) % num_frames;
 

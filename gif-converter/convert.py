@@ -13,10 +13,10 @@ This script will:
 - Take all GIFs from the source directory
 - Resize and center-crop them to the specified size (default 20x20, no squishing)
 - Replace transparency with black
-- Reduce color palette (default 16 colors, customizable)
+- Reduce color palette (default 16 colors, customizable) - Note: Color reduction might be less effective before RGB332 conversion.
 - Drop frames with stride (default 1, customizable)
 - Optimize/compress them
-- Save them to the output directory
+- Save them to the output directory as RGB332 .bin files
 """
 
 import os
@@ -90,7 +90,7 @@ def process_gif(input_path, output_dir, size=(466, 466)):
         img_composited = Image.alpha_composite(background, img_resized)
         img_final_rgb = img_composited.convert('RGB')
 
-        # Prepare to write binary RGB565 data
+        # Prepare to write binary RGB332 data
         out_path = os.path.join(output_dir, f"{base_name}-{i}.bin")
         
         pixel_data_bin = bytearray()
@@ -99,25 +99,21 @@ def process_gif(input_path, output_dir, size=(466, 466)):
             for x_coord in range(size[0]):
                 r, g, b = img_final_rgb.getpixel((x_coord, y_coord))
                 
-                # Convert RGB888 to RGB565 standard
-                # R (5 bits), G (6 bits), B (5 bits)
-                r5 = (r >> 3) & 0x1F
-                g6 = (g >> 2) & 0x3F
-                b5 = (b >> 3) & 0x1F
-                rgb565_standard = (r5 << 11) | (g6 << 5) | b5
+                # Convert RGB888 to RGB332
+                # R (3 bits), G (3 bits), B (2 bits)
+                r3 = (r >> 5) & 0x07 # Top 3 bits of red
+                g3 = (g >> 5) & 0x07 # Top 3 bits of green
+                b2 = (b >> 6) & 0x03 # Top 2 bits of blue
                 
-                # Byte swap for CO5300 expectation (e.g., 0xF800 (standard red) -> 0x00F8)
-                # This creates the uint16_t value that will be in the C array
-                rgb565_swapped_val = ((rgb565_standard & 0x00FF) << 8) | \
-                                     ((rgb565_standard & 0xFF00) >> 8)
+                rgb332_byte = (r3 << 5) | (g3 << 2) | b2
                 
-                # Pack as little-endian unsigned short (2 bytes)
-                pixel_data_bin.extend(struct.pack('<H', rgb565_swapped_val))
+                # Pack as unsigned char (1 byte)
+                pixel_data_bin.extend(struct.pack('B', rgb332_byte))
                 
         with open(out_path, 'wb') as f_bin:
             f_bin.write(pixel_data_bin)
             
-        print(f"Saved frame {i} as RGB565 .bin: {out_path}")
+        print(f"Saved frame {i} as RGB332 .bin: {out_path}")
         # Store the filename relative to the manifest file itself
         generated_files.append(f"{base_name}-{i}.bin")
         frame_count += 1
@@ -128,7 +124,7 @@ def process_gif(input_path, output_dir, size=(466, 466)):
     return generated_files # Return the list of generated filenames
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert GIFs to raw RGB565 binary frames (byte-swapped for CO5300) and generate a manifest.txt.")
+    parser = argparse.ArgumentParser(description="Convert GIFs to raw RGB332 binary frames and generate a manifest.txt.")
     parser.add_argument('--source', type=str, required=True, help='Source directory containing GIFs')
     parser.add_argument('--output', type=str, required=True, help='Output directory for .bin frames')
     parser.add_argument('--size', nargs='+', type=int, default=[466], 

@@ -43,6 +43,8 @@
     "ff.h": "c",
     "sd_card.h": "c",
     "hw_config.h": "c",
-    "lv_port_disp.h": "c"
+    "lv_port_disp.h": "c",
+    "bsp_co5300.h": "c",
+    "stdlib.h": "c"
   }
 }

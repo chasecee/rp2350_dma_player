@@ -48,7 +48,7 @@ bsp_co5300_info_t *bsp_co5300_get_info(void);
 void bsp_co5300_init(bsp_co5300_info_t *co5300_info);
 void bsp_co5300_set_window(uint16_t x_start, uint16_t y_start, uint16_t x_end, uint16_t y_end);
 
-void bsp_co5300_flush(uint16_t *color, size_t color_len);
+void bsp_co5300_flush(uint8_t *color, size_t color_len);
 
 void bsp_co5300_set_brightness(uint8_t brightness);
 void bsp_co5300_set_power(bool on);
