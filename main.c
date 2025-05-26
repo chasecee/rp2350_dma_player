@@ -12,8 +12,8 @@
 #define DISPLAY_HEIGHT 466
 #define FRAME_WIDTH 156         // Updated for the new frame size
 #define FRAME_HEIGHT 156        // Updated for the new frame size
-#define SCALED_FRAME_WIDTH 196  // New: Apparent width of each tile
-#define SCALED_FRAME_HEIGHT 196 // New: Apparent height of each tile
+#define SCALED_FRAME_WIDTH 246  // New: Apparent width of each tile
+#define SCALED_FRAME_HEIGHT 246 // New: Apparent height of each tile
 
 // Updated color definitions for 8-bit RGB332
 #define RED_COLOR 0xE0   // Binary 11100000 (R:111, G:000, B:00)
