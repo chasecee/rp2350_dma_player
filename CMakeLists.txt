@@ -23,6 +23,10 @@ set(CMAKE_CXX_STANDARD 17)
 
 pico_sdk_init()
 
+# Set optimization level for release builds
+set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+
 add_subdirectory(libraries/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/src)
 
 add_executable(rp2350_dma_player

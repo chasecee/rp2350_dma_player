@@ -39,8 +39,8 @@ void bsp_co5300_tx_cmd(bsp_co5300_cmd_t *cmds, size_t cmd_len)
 
 static void bsp_co5300_spi_init(void)
 {
-    // spi_init(BSP_CO5300_SPI_NUM, 80 * 1000 * 1000); // Original 80 MHz
-    spi_init(BSP_CO5300_SPI_NUM, 50 * 1000 * 1000); // Changed to 50 MHz (datasheet max)
+    spi_init(BSP_CO5300_SPI_NUM, 80 * 1000 * 1000); // Original 80 MHz
+    // spi_init(BSP_CO5300_SPI_NUM, 50 * 1000 * 1000); // Changed to 50 MHz (datasheet max)
     gpio_set_function(BSP_CO5300_MOSI_PIN, GPIO_FUNC_SPI);
     gpio_set_function(BSP_CO5300_SCLK_PIN, GPIO_FUNC_SPI);
 

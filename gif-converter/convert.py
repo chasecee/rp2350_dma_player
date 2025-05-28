@@ -43,45 +43,24 @@ def crop_and_resize(img, size=(20, 20)):
     img = img.crop((left, top, left + size[0], top + size[1]))
     return img
 
-def force_black_palette_index_0(img):
-    palette = img.getpalette()
-    # Check if black is already index 0
-    if palette[0:3] == [0, 0, 0]:
-        return img  # Already black
-    # Find black in the palette
-    try:
-        black_index = next(i for i in range(256) if palette[i*3:i*3+3] == [0, 0, 0])
-    except StopIteration:
-        # No black in palette, add it at index 0
-        palette[0:3] = [0, 0, 0]
-        img.putpalette(palette)
-        return img
-    # Swap black to index 0
-    palette[0:3], palette[black_index*3:black_index*3+3] = palette[black_index*3:black_index*3+3], palette[0:3]
-    img.putpalette(palette)
-    # Remap pixels: swap all 0s and black_index in the image data
-    data = list(img.getdata())
-    new_data = []
-    for px in data:
-        if px == 0:
-            new_data.append(black_index)
-        elif px == black_index:
-            new_data.append(0)
-        else:
-            new_data.append(px)
-    img.putdata(new_data)
-    return img
-
-def process_gif(input_path, output_dir, size=(466, 466)):
+def process_media_file(input_path, output_dir, rgb332_palette_img, size=(466, 466), rotation=None, max_frames=None):
     reader = imageio.get_reader(input_path)
     base_name = os.path.splitext(os.path.basename(input_path))[0]
     generated_files = [] # List to store generated filenames
     
     frame_count = 0
     for i, frame_data in enumerate(reader):
+        if max_frames is not None and i >= max_frames: # Check frame limit
+            print(f"Reached max_frames limit ({max_frames}), stopping processing for {input_path}.")
+            break
+
         img = Image.fromarray(frame_data)
         img = img.convert('RGBA')
         
+        # Apply rotation if specified
+        if rotation:
+            img = img.rotate(rotation, expand=True) # expand=True to avoid cropping during rotation
+
         # Crop and resize using the provided size
         img_resized = crop_and_resize(img, size) 
         
@@ -90,25 +69,21 @@ def process_gif(input_path, output_dir, size=(466, 466)):
         img_composited = Image.alpha_composite(background, img_resized)
         img_final_rgb = img_composited.convert('RGB')
 
+        # Quantize to RGB332 palette with dithering
+        img_quantized = img_final_rgb.quantize(palette=rgb332_palette_img, dither=Image.FLOYDSTEINBERG)
+
+        # Save the first frame as a JPEG thumbnail (using the dithered image for preview)
+        if i == 0:
+            thumbnail_path = os.path.join(output_dir, f"{base_name}-thumbnail.jpg")
+            # For JPEG, convert back to RGB as JPEG doesn't support palette directly
+            img_quantized.convert('RGB').save(thumbnail_path, "JPEG") 
+            print(f"Saved thumbnail: {thumbnail_path}")
+
         # Prepare to write binary RGB332 data
         out_path = os.path.join(output_dir, f"{base_name}-{i}.bin")
         
-        pixel_data_bin = bytearray()
-        
-        for y_coord in range(size[1]):
-            for x_coord in range(size[0]):
-                r, g, b = img_final_rgb.getpixel((x_coord, y_coord))
-                
-                # Convert RGB888 to RGB332
-                # R (3 bits), G (3 bits), B (2 bits)
-                r3 = (r >> 5) & 0x07 # Top 3 bits of red
-                g3 = (g >> 5) & 0x07 # Top 3 bits of green
-                b2 = (b >> 6) & 0x03 # Top 2 bits of blue
-                
-                rgb332_byte = (r3 << 5) | (g3 << 2) | b2
-                
-                # Pack as unsigned char (1 byte)
-                pixel_data_bin.extend(struct.pack('B', rgb332_byte))
+        # Get the pixel data (already RGB332 indices)
+        pixel_data_bin = bytes(img_quantized.getdata())
                 
         with open(out_path, 'wb') as f_bin:
             f_bin.write(pixel_data_bin)
@@ -129,7 +104,28 @@ def main():
     parser.add_argument('--output', type=str, required=True, help='Output directory for .bin frames')
     parser.add_argument('--size', nargs='+', type=int, default=[466], 
                         help='Target size W (for square WxW) or W H (default: 466 for 466x466)')
+    parser.add_argument('--rotate', type=int, choices=[90, 180, -90], help='Rotate frames by 90, 180, or -90 degrees.')
+    parser.add_argument('--max_frames', type=int, help='Maximum number of frames to process from each file.')
     args = parser.parse_args()
+
+    # Create RGB332 palette image
+    rgb332_palette_data = []
+    for i in range(256):
+        r3 = (i >> 5) & 0x07
+        g3 = (i >> 2) & 0x07
+        b2 = i & 0x03
+        r8 = r3 << 5
+        g8 = g3 << 5
+        b8 = b2 << 6
+        rgb332_palette_data.extend([r8, g8, b8])
+    
+    # Pad palette to 256*3 = 768 entries if it's shorter (PIL requirement)
+    # This shouldn't be necessary as we iterate 0-255, creating 256*3 entries.
+    # if len(rgb332_palette_data) < 256 * 3:
+    #     rgb332_palette_data.extend([0,0,0] * (256 - len(rgb332_palette_data) // 3))
+
+    global_rgb332_palette_img = Image.new('P', (1, 1))
+    global_rgb332_palette_img.putpalette(rgb332_palette_data)
 
     # Parse size argument
     parsed_size_arg = args.size
@@ -145,10 +141,9 @@ def main():
     os.makedirs(args.output, exist_ok=True)
     all_frame_files = [] # List to store all frame filenames from all GIFs
     for fname in os.listdir(args.source):
-        if fname.lower().endswith('.gif'):
+        if fname.lower().endswith(('.gif', '.mp4')):
             in_path = os.path.join(args.source, fname)
-            # process_gif now returns a list of filenames
-            gif_frame_files = process_gif(in_path, args.output, size=output_size)
+            gif_frame_files = process_media_file(in_path, args.output, global_rgb332_palette_img, size=output_size, rotation=args.rotate, max_frames=args.max_frames)
             all_frame_files.extend(gif_frame_files)
 
     # After processing all GIFs, write the manifest file
