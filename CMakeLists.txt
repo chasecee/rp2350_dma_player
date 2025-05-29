@@ -26,7 +26,10 @@ pico_sdk_init()
 add_subdirectory(libraries/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/src)
 
 add_executable(rp2350_dma_player
-    main.c
+    src/main.c
+    src/dma_config.c
+    src/sd_loader.c
+    src/display_module.c
     hw_config.c
     libraries/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/src/sd_driver/SPI/sd_spi.c
     libraries/bsp/bsp_cd5300.c
@@ -36,6 +39,7 @@ add_executable(rp2350_dma_player
 )
 
 target_include_directories(rp2350_dma_player PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/libraries/bsp
     ${CMAKE_CURRENT_SOURCE_DIR}/libraries/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/src/include
     ${CMAKE_CURRENT_SOURCE_DIR}/libraries/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/src/sd_driver

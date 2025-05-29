@@ -1,22 +1,22 @@
 """
-GIF Converter for LVGL Projects
+GIF/MP4 Converter for LVGL Projects
 
 Usage:
-    python convert.py --source ./source --output ./output [--size 32] [--size 32 24] [--colors 16] [--frame-stride 2]
+    python convert.py --source ./source --output ./output [--size 32] [--size 32 24] [--rotate {0,90,180,-90}]
 
 Virtual Environment Setup:
     python3 -m venv .venv
     source .venv/bin/activate
-    pip install pillow imageio
+    pip install pillow imageio imageio-ffmpeg
 
 This script will:
-- Take all GIFs from the source directory
-- Resize and center-crop them to the specified size (default 20x20, no squishing)
-- Replace transparency with black
-- Reduce color palette (default 16 colors, customizable)
-- Drop frames with stride (default 1, customizable)
-- Optimize/compress them
-- Save them to the output directory
+- Take all GIFs and MP4s from the source directory
+- Rotate frames if specified (0, 90, 180, or -90 degrees)
+- Resize and center-crop them to the specified size (default 466x466, no squishing)
+- Replace transparency with black (for GIFs)
+- Convert to RGB565 format (16-bit color)
+- Save frames as binary files to the output directory
+- Generate a JPEG thumbnail of the first frame
 """
 
 import os
@@ -24,6 +24,8 @@ import argparse
 from PIL import Image
 import imageio
 import struct # Added for packing binary data
+
+FILES_PER_SUBDIR = 500 # Max number of frames per subdirectory
 
 def crop_and_resize(img, size=(20, 20)):
     # Resize to fill, then center-crop
@@ -72,15 +74,28 @@ def force_black_palette_index_0(img):
     img.putdata(new_data)
     return img
 
-def process_gif(input_path, output_dir, size=(466, 466)):
+def process_gif(input_path, base_output_dir, size=(466, 466), rotation=0, global_frame_idx_offset=0):
     reader = imageio.get_reader(input_path)
     base_name = os.path.splitext(os.path.basename(input_path))[0]
-    generated_files = [] # List to store generated filenames
+    generated_manifest_entries = [] # List to store generated filenames for the manifest
     
-    frame_count = 0
+    frame_count_this_file = 0
+    first_frame_img_for_master_thumb = None # Added to capture first frame image
+
     for i, frame_data in enumerate(reader):
+        current_global_frame_idx = global_frame_idx_offset + i
+        subdir_num = current_global_frame_idx // FILES_PER_SUBDIR
+        subdir_name = f"{subdir_num:03d}" # e.g., "000", "001"
+        
+        actual_output_subdir = os.path.join(base_output_dir, subdir_name)
+        os.makedirs(actual_output_subdir, exist_ok=True)
+        
         img = Image.fromarray(frame_data)
         img = img.convert('RGBA')
+        
+        # Apply rotation if needed
+        if rotation != 0:
+            img = img.rotate(rotation, expand=True)
         
         # Crop and resize using the provided size
         img_resized = crop_and_resize(img, size) 
@@ -90,8 +105,13 @@ def process_gif(input_path, output_dir, size=(466, 466)):
         img_composited = Image.alpha_composite(background, img_resized)
         img_final_rgb = img_composited.convert('RGB')
 
+        # Capture the first frame for a potential master thumbnail
+        if i == 0:
+            first_frame_img_for_master_thumb = img_final_rgb.copy()
+
         # Prepare to write binary RGB565 data
-        out_path = os.path.join(output_dir, f"{base_name}-{i}.bin")
+        bin_filename = f"{base_name}-{i}.bin"
+        out_path = os.path.join(actual_output_subdir, bin_filename)
         
         pixel_data_bin = bytearray()
         
@@ -118,21 +138,24 @@ def process_gif(input_path, output_dir, size=(466, 466)):
             f_bin.write(pixel_data_bin)
             
         print(f"Saved frame {i} as RGB565 .bin: {out_path}")
-        # Store the filename relative to the manifest file itself
-        generated_files.append(f"{base_name}-{i}.bin")
-        frame_count += 1
+        # Store the filename relative to the base_output_dir (for manifest)
+        manifest_entry = os.path.join(subdir_name, bin_filename)
+        generated_manifest_entries.append(manifest_entry.replace(os.path.sep, '/'))
+        frame_count_this_file += 1
         
     reader.close()
-    if frame_count == 0:
+    if frame_count_this_file == 0:
         print(f"No frames processed from {input_path}")
-    return generated_files # Return the list of generated filenames
+    return generated_manifest_entries, frame_count_this_file, first_frame_img_for_master_thumb
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert GIFs to raw RGB565 binary frames (byte-swapped for CO5300) and generate a manifest.txt.")
-    parser.add_argument('--source', type=str, required=True, help='Source directory containing GIFs')
+    parser = argparse.ArgumentParser(description="Convert GIFs and MP4s to raw RGB565 binary frames (byte-swapped for CO5300) and generate a manifest.txt.")
+    parser.add_argument('--source', type=str, required=True, help='Source directory containing GIFs and MP4s')
     parser.add_argument('--output', type=str, required=True, help='Output directory for .bin frames')
     parser.add_argument('--size', nargs='+', type=int, default=[466], 
                         help='Target size W (for square WxW) or W H (default: 466 for 466x466)')
+    parser.add_argument('--rotate', type=int, choices=[0, 90, 180, -90], default=0,
+                        help='Rotation angle in degrees (default: 0)')
     args = parser.parse_args()
 
     # Parse size argument
@@ -147,24 +170,58 @@ def main():
         output_size = (466, 466)
 
     os.makedirs(args.output, exist_ok=True)
-    all_frame_files = [] # List to store all frame filenames from all GIFs
-    for fname in os.listdir(args.source):
-        if fname.lower().endswith('.gif'):
-            in_path = os.path.join(args.source, fname)
-            # process_gif now returns a list of filenames
-            gif_frame_files = process_gif(in_path, args.output, size=output_size)
-            all_frame_files.extend(gif_frame_files)
+    all_manifest_entries = [] # List to store all frame filenames from all GIFs/MP4s
+    master_frame_counter = 0 # Keep track of total frames processed for subdirectory naming
+    master_thumbnail_saved = False # Flag for the new master thumbnail
+    script_dir = os.path.dirname(os.path.abspath(__file__)) # Get script's directory
 
-    # After processing all GIFs, write the manifest file
-    if all_frame_files:
+    for fname in os.listdir(args.source):
+        if fname.lower().endswith(('.gif', '.mp4')):
+            in_path = os.path.join(args.source, fname)
+            print(f"Processing {'video' if fname.lower().endswith('.mp4') else 'GIF'}: {fname}")
+            
+            manifest_entries, num_frames_processed, first_frame_image = process_gif(
+                in_path, 
+                args.output, 
+                size=output_size, 
+                rotation=args.rotate,
+                global_frame_idx_offset=master_frame_counter
+            )
+            all_manifest_entries.extend(manifest_entries)
+            master_frame_counter += num_frames_processed
+
+            if first_frame_image and not master_thumbnail_saved:
+                try:
+                    master_thumb_path = os.path.join(script_dir, "master_thumbnail.jpg")
+                    # first_frame_image is already at output_size due to crop_and_resize
+                    first_frame_image.save(master_thumb_path, "JPEG", quality=85) # Removed .resize()
+                    print(f"Saved master thumbnail: {master_thumb_path}")
+                    master_thumbnail_saved = True
+                except Exception as e:
+                    print(f"Error saving master thumbnail: {e}")
+
+    # After processing all GIFs/MP4s, write the manifest file
+    if all_manifest_entries:
         manifest_path = os.path.join(args.output, 'manifest.txt')
         with open(manifest_path, 'w') as mf:
-            for frame_file_rel_path in all_frame_files:
-                # Ensure path separator is '/' and correct newline
-                mf.write(frame_file_rel_path.replace(os.path.sep, '/') + '\n')
-        print(f"Generated manifest.txt at {manifest_path} with {len(all_frame_files)} entries.")
+            for frame_file_rel_path in all_manifest_entries:
+                # Ensure path separator is '/' and correct newline (already handled in process_gif)
+                mf.write(frame_file_rel_path + '\n')
+        print(f"Generated manifest.txt at {manifest_path} with {len(all_manifest_entries)} entries.")
     else:
         print("No frames were processed, so no manifest.txt was generated.")
+
+    # --- Add this section to write the run command ---
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        run_command_file_path = os.path.join(script_dir, "run-command.txt")
+        command_to_write = "python convert.py --source ./source --output ./output --size 156 --rotate -90"
+        with open(run_command_file_path, 'w') as rcf:
+            rcf.write(command_to_write + '\n')
+        print(f"Updated run command in: {run_command_file_path}")
+    except Exception as e:
+        print(f"Error writing run-command.txt: {e}")
+    # --- End of section ---
 
 if __name__ == '__main__':
     main()
