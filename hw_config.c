@@ -7,7 +7,7 @@ static spi_t spi = {
     .sck_gpio = 2,   // GPIO number (not Pico pin number)
     .mosi_gpio = 3,
     .miso_gpio = 4,
-    .baud_rate = 125 * 1000 * 1000 / 2, // Increased to 62.5 MHz
+    .baud_rate = 125 * 1000 * 1000 / 2, // 62.5 MHz
     .spi_mode = 3                       // Explicitly set to SPI Mode 3
     // Other spi_t fields will be default (0/false) if not specified
 };
@@ -20,11 +20,7 @@ static sd_spi_if_t spi_if = {
 };
 
 /* Configuration of the SD Card socket object */
-// This is the global sd_card_t instance that sd_get_by_num will return.
 sd_card_t sd_card = {
-    // Changed to non-static to match previous hw_config.c,
-    // ensuring it's globally accessible if anything else relies on that.
-    // If only used by sd_get_by_num, static is fine.
     .type = SD_IF_SPI,
     .spi_if_p = &spi_if // Pointer to the SPI interface driving this card
     // Card detection is not configured here.

@@ -1,0 +1,1 @@
+python convert.py --source ./source --output ./output --size 156 --rotate -90
