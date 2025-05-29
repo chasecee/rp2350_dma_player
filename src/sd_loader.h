@@ -6,17 +6,17 @@
 
 // Configurable chunk size for reading from SD card
 // Should be a multiple of 512 for efficiency, e.g., 4096, 8192
-#define SD_READ_CHUNK_SIZE (4 * 1024) // 4KB chunks
+#define SD_READ_CHUNK_SIZE (FRAME_WIDTH * FRAME_HEIGHT * 2) // Full frame size
 
 // These dimensions must match those used by the display logic in main.c
 // If main.c defines them, this module could extern them, or they can be duplicated.
 // For now, defining them here for clarity within the loader's scope of managing these buffers.
-#define FRAME_WIDTH 156
-#define FRAME_HEIGHT 156
+#define FRAME_WIDTH 288
+#define FRAME_HEIGHT 288
 
 // Maximum number of frame filenames the manifest reader in main.c can handle.
 // This is used to size the pointer passed to sd_loader_init.
-#define MAX_FRAMES 460 // Must match main.c
+#define MAX_FRAMES 460      // Must match main.c
 #define MAX_FILENAME_LEN 64 // Must match main.c
 
 // The double buffers for frame data, managed by this module
@@ -58,4 +58,4 @@ int sd_loader_get_target_frame_for_buffer(int buffer_idx);
  */
 void sd_loader_mark_buffer_consumed(int buffer_idx, int next_frame_to_target_for_this_buffer);
 
-#endif // SD_LOADER_H 
+#endif // SD_LOADER_H

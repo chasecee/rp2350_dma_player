@@ -13,6 +13,7 @@ if (EXISTS ${picoVscode})
 endif()
 # ====================================================================================
 set(PICO_BOARD pico2 CACHE STRING "Board type")
+set(PICO_PLATFORM rp2350 CACHE STRING "Target platform")
 
 cmake_minimum_required(VERSION 3.13)
 include(pico_sdk_import.cmake)

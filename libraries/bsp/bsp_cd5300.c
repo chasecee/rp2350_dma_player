@@ -56,8 +56,8 @@ void bsp_co5300_dma_callback(void)
     while (spi_get_hw(BSP_CO5300_SPI_NUM)->sr & SPI_SSPSR_BSY_BITS)
         ;
 
-    // sleep_us(1); // Temporarily commenting out sleep_us as well
-    gpio_put(BSP_CO5300_CS_PIN, 1);
+    // CS is now managed externally for frame pixel data
+    // gpio_put(BSP_CO5300_CS_PIN, 1); // REMOVED
     /* Temporarily comment out brightness adjustment in ISR
     if (g_co5300_info->set_brightness_flag)
     {
@@ -85,6 +85,8 @@ static void bsp_co5300_spi_dma_init(void)
     dma_channel_config c = dma_channel_get_default_config(g_co5300_info->dma_tx_channel);
     channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
     channel_config_set_dreq(&c, spi_get_dreq(BSP_CO5300_SPI_NUM, true));
+    channel_config_set_read_increment(&c, true);   // Explicitly enable read increment
+    channel_config_set_write_increment(&c, false); // Explicitly disable write increment
     dma_channel_configure(g_co5300_info->dma_tx_channel, &c,
                           &spi_get_hw(BSP_CO5300_SPI_NUM)->dr, // write address
                           NULL,                                // read address
@@ -141,6 +143,20 @@ static void bsp_co5300_reg_init(void)
     };
 
     bsp_co5300_tx_cmd(co5300_init_cmds, sizeof(co5300_init_cmds) / sizeof(bsp_co5300_cmd_t));
+}
+
+void bsp_co5300_prepare_for_frame_pixels(void)
+{
+    gpio_put(BSP_CO5300_CS_PIN, 0);
+    gpio_put(BSP_CO5300_DC_PIN, 1);
+}
+
+void bsp_co5300_finish_frame_pixels(void)
+{
+    // Ensure SPI is fully done before deselecting.
+    // The main loop should wait for the last DMA completion,
+    // which in turn means the DMA callback (waiting on BSY) has run.
+    gpio_put(BSP_CO5300_CS_PIN, 1);
 }
 
 void bsp_co5300_set_window(uint16_t x_start, uint16_t y_start, uint16_t x_end, uint16_t y_end)
@@ -200,17 +216,19 @@ void bsp_co5300_flush(uint16_t *color, size_t color_len)
 
     if (g_co5300_info->enabled_dma)
     {
-        gpio_put(BSP_CO5300_CS_PIN, 0);
-        gpio_put(BSP_CO5300_DC_PIN, 1);
-        dma_channel_set_trans_count(g_co5300_info->dma_tx_channel, color_len * 2, true);
+        // CS and DC are now managed externally for frame pixel data
+        // gpio_put(BSP_CO5300_CS_PIN, 0); // REMOVED
+        // gpio_put(BSP_CO5300_DC_PIN, 1); // REMOVED
         dma_channel_set_read_addr(g_co5300_info->dma_tx_channel, color, false);
+        dma_channel_set_trans_count(g_co5300_info->dma_tx_channel, color_len * 2, true);
     }
     else
     {
-        gpio_put(BSP_CO5300_CS_PIN, 0);
-        gpio_put(BSP_CO5300_DC_PIN, 1);
+        // For non-DMA, also assume CS/DC is handled externally for consistency during frame writes
+        // gpio_put(BSP_CO5300_CS_PIN, 0); // REMOVED
+        // gpio_put(BSP_CO5300_DC_PIN, 1); // REMOVED
         spi_write_blocking(BSP_CO5300_SPI_NUM, (uint8_t *)color, color_len * 2);
-        gpio_put(BSP_CO5300_CS_PIN, 1);
+        // gpio_put(BSP_CO5300_CS_PIN, 1); // REMOVED
     }
 }
 

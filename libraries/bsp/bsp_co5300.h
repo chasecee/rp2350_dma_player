@@ -9,19 +9,17 @@
 
 #include "bsp_dma_channel_irq.h"
 
-#define BSP_CO5300_SPI_NUM      spi1    
+#define BSP_CO5300_SPI_NUM spi1
 
-#define BSP_CO5300_MOSI_PIN     11
-#define BSP_CO5300_MISO_PIN     -1
-#define BSP_CO5300_SCLK_PIN     10
+#define BSP_CO5300_MOSI_PIN 11
+#define BSP_CO5300_MISO_PIN -1
+#define BSP_CO5300_SCLK_PIN 10
 
-#define BSP_CO5300_DC_PIN       12
-#define BSP_CO5300_CS_PIN       13
-#define BSP_CO5300_RST_PIN      14
+#define BSP_CO5300_DC_PIN 12
+#define BSP_CO5300_CS_PIN 13
+#define BSP_CO5300_RST_PIN 14
 
-#define BSP_CO5300_PWR_PIN      15
-
-
+#define BSP_CO5300_PWR_PIN 15
 
 typedef struct
 {
@@ -40,8 +38,7 @@ typedef struct
     bool power_on;
 
     channel_irq_callback_t dma_flush_done_callback;
-}bsp_co5300_info_t;
-
+} bsp_co5300_info_t;
 
 bsp_co5300_info_t *bsp_co5300_get_info(void);
 
@@ -52,5 +49,8 @@ void bsp_co5300_flush(uint16_t *color, size_t color_len);
 
 void bsp_co5300_set_brightness(uint8_t brightness);
 void bsp_co5300_set_power(bool on);
+
+void bsp_co5300_prepare_for_frame_pixels(void);
+void bsp_co5300_finish_frame_pixels(void);
 
 #endif // __BSP_CO5300_H__
