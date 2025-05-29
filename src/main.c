@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h> // For strcpy, etc.
 #include "pico/stdlib.h"
+#include "pico/time.h"  // Added for profiling
 #include "ff.h"         // FatFS library
 #include "sd_card.h"    // SD card driver functions
 #include "bsp_co5300.h" // CO5300 display driver
@@ -16,13 +17,13 @@
 #define GREEN_COLOR 0xE007 // RGB565 green - Bytes swapped for CO5300
 #define BLUE_COLOR 0x1F00  // RGB565 blue - Bytes swapped for CO5300
 #define MAX_FILENAME_LEN 64
-#define MAX_FRAMES 4000 // Max number of frames we can list in the manifest
+#define MAX_FRAMES 500 // Max number of frames we can list in the manifest
+
+// Precomputed scaling maps
+static uint16_t source_y_map[DISPLAY_HEIGHT];
+static uint16_t source_x_map[DISPLAY_WIDTH];
 
 volatile bool dma_transfer_complete = true; // Flag for DMA completion (for display flushing)
-
-// Declare buffer_ready and next_buffer at the top level - MOVED TO SD_LOADER
-// static bool buffer_ready[2] = {false, false};
-// static int next_buffer = 0;
 
 // Callback function for DMA
 void dma_done_callback(void)
@@ -30,61 +31,20 @@ void dma_done_callback(void)
     dma_transfer_complete = true; // Signal DMA completion
 }
 
-// Initialize pre-computed scaling tables
-// static void init_scaling_tables(void)
-// {
-//     const int PADDING_X = (DISPLAY_WIDTH - SCALED_FRAME_WIDTH) / 2;
-//     const int PADDING_Y = (DISPLAY_HEIGHT - SCALED_FRAME_HEIGHT) / 2;
-//
-//     // Pre-compute x scaling
-//     for (int dx = 0; dx < DISPLAY_WIDTH; dx++)
-//     {
-//         bool in_horizontal_grid = (dx >= (PADDING_X - SCALED_FRAME_WIDTH) && dx < (PADDING_X + SCALED_FRAME_WIDTH * 2));
-//         if (in_horizontal_grid)
-//         {
-//             int dx_relative_to_grid_start = dx - (PADDING_X - SCALED_FRAME_WIDTH);
-//             int x_in_current_scaled_tile = dx_relative_to_grid_start % SCALED_FRAME_WIDTH;
-//             x_scale_table[dx] = (x_in_current_scaled_tile * FRAME_WIDTH) / SCALED_FRAME_WIDTH;
-//         }
-//         else
-//         {
-//             x_scale_table[dx] = 0xFFFF; // Invalid marker
-//         }
-//     }
-//
-//     // Pre-compute y scaling
-//     for (int dy = 0; dy < DISPLAY_HEIGHT; dy++)
-//     {
-//         bool in_vertical_grid = (dy >= (PADDING_Y - SCALED_FRAME_HEIGHT) && dy < (PADDING_Y + SCALED_FRAME_HEIGHT * 2));
-//         if (in_vertical_grid)
-//         {
-//             int dy_relative_to_grid_start = dy - (PADDING_Y - SCALED_FRAME_HEIGHT);
-//             int y_in_current_scaled_tile = dy_relative_to_grid_start % SCALED_FRAME_HEIGHT;
-//             y_scale_table[dy] = (y_in_current_scaled_tile * FRAME_HEIGHT) / SCALED_FRAME_HEIGHT;
-//         }
-//         else
-//         {
-//             y_scale_table[dy] = 0xFFFF; // Invalid marker
-//         }
-//     }
-//
-//     // Pre-compute grid validity
-//     for (int dx = 0; dx < DISPLAY_WIDTH; dx++)
-//     {
-//         for (int dy = 0; dy < DISPLAY_HEIGHT; dy++)
-//         {
-//             bool in_horizontal_grid = (dx >= (PADDING_X - SCALED_FRAME_WIDTH) && dx < (PADDING_X + SCALED_FRAME_WIDTH * 2));
-//             bool in_vertical_grid = (dy >= (PADDING_Y - SCALED_FRAME_HEIGHT) && dy < (PADDING_Y + SCALED_FRAME_HEIGHT * 2));
-//             grid_valid_table[dx][dy] = in_horizontal_grid && in_vertical_grid;
-//         }
-//     }
-// }
-
-// Callback function when a frame is loaded - REMOVED (handled by sd_loader)
-// void frame_load_complete(void)
-// {
-//     buffer_ready[next_buffer] = true;
-// }
+// Function to initialize precomputed scaling maps
+void init_scaling_maps(void)
+{
+    printf("Initializing scaling maps...\n");
+    for (int i = 0; i < DISPLAY_HEIGHT; i++)
+    {
+        source_y_map[i] = (i * FRAME_HEIGHT) / DISPLAY_HEIGHT;
+    }
+    for (int i = 0; i < DISPLAY_WIDTH; i++)
+    {
+        source_x_map[i] = (i * FRAME_WIDTH) / DISPLAY_WIDTH;
+    }
+    printf("Scaling maps initialized.\n");
+}
 
 // Function to display a test pattern
 void display_test_pattern(void)
@@ -113,8 +73,8 @@ int main()
     sleep_ms(2000);
     printf("MINIMAL HELLO WORLD! Can you see me? (Attempting minimal display init)\n");
 
-    // Initialize scaling tables - REMOVED
-    // init_scaling_tables();
+    // Initialize precomputed scaling maps
+    init_scaling_maps();
 
     // Initialize Display (minimal parameters)
     printf("Initializing display (minimal parameters)...\n");
@@ -123,7 +83,7 @@ int main()
         .height = DISPLAY_HEIGHT,
         .x_offset = 6, // Adjusted based on working LVGL example
         .y_offset = 0,
-        .brightness = 80,
+        .brightness = 95,
         .enabled_dma = true,
         .dma_flush_done_callback = dma_done_callback};
     bsp_co5300_init(&display_info);
@@ -273,10 +233,19 @@ int main()
 
     printf("Entering main display & loader loop\n");
 
+    absolute_time_t loop_start_time, loop_end_time;
+    absolute_time_t sd_load_start_time, sd_load_end_time;
+    absolute_time_t display_prep_start_time, display_prep_end_time;
+    absolute_time_t display_render_start_time, display_render_end_time;
+
     while (1)
     {
+        loop_start_time = get_absolute_time();
+
         // Process SD card loading - this will load chunks into buffers if needed
+        sd_load_start_time = get_absolute_time();
         sd_loader_process();
+        sd_load_end_time = get_absolute_time();
 
         // Check if the buffer we expect to display from is ready and contains the correct frame
         if (buffer_ready[display_buffer_idx] &&
@@ -285,17 +254,22 @@ int main()
             // printf("Displaying frame %d from buffer_idx %d\n", display_frame_idx, display_buffer_idx);
             bsp_co5300_set_window(0, 0, DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1);
 
+            display_render_start_time = get_absolute_time();
+
             cpu_buffer_ptr = frame_line_buffer_a;
             dma_buffer_ptr = frame_line_buffer_b;
 
             // Prime the first buffer for DMA (display line 0)
             // Scaled drawing: for display line y=0
-            int sy_scaled = (0 * FRAME_HEIGHT) / DISPLAY_HEIGHT; // Effective source y for display y=0
+            display_prep_start_time = get_absolute_time();
+            uint16_t current_source_y_for_prime = source_y_map[0];
+            uint32_t source_row_offset_for_prime = (uint32_t)current_source_y_for_prime * FRAME_WIDTH;
             for (int dx = 0; dx < DISPLAY_WIDTH; ++dx)
             {
-                int sx_scaled = (dx * FRAME_WIDTH) / DISPLAY_WIDTH; // Effective source x for display x
-                cpu_buffer_ptr[dx] = frame_buffers[display_buffer_idx][sy_scaled * FRAME_WIDTH + sx_scaled];
+                cpu_buffer_ptr[dx] = frame_buffers[display_buffer_idx][source_row_offset_for_prime + source_x_map[dx]];
             }
+            display_prep_end_time = get_absolute_time();
+            printf("Initial line prep took %lld us\n", absolute_time_diff_us(display_prep_start_time, display_prep_end_time));
 
             for (int y = 0; y < DISPLAY_HEIGHT; y++)
             {
@@ -315,12 +289,16 @@ int main()
                 {
                     int display_y_next = y + 1;
                     // Scaled drawing for the next line
-                    sy_scaled = (display_y_next * FRAME_HEIGHT) / DISPLAY_HEIGHT; // Effective source y for next display y
+                    display_prep_start_time = get_absolute_time();
+                    uint16_t current_source_y_for_next = source_y_map[display_y_next];
+                    uint32_t source_row_offset_for_next = (uint32_t)current_source_y_for_next * FRAME_WIDTH;
                     for (int dx = 0; dx < DISPLAY_WIDTH; ++dx)
                     {
-                        int sx_scaled = (dx * FRAME_WIDTH) / DISPLAY_WIDTH; // Effective source x for display x
-                        cpu_buffer_ptr[dx] = frame_buffers[display_buffer_idx][sy_scaled * FRAME_WIDTH + sx_scaled];
+                        cpu_buffer_ptr[dx] = frame_buffers[display_buffer_idx][source_row_offset_for_next + source_x_map[dx]];
                     }
+                    display_prep_end_time = get_absolute_time();
+                    if (y == 0)
+                        printf("Subsequent line prep took %lld us\n", absolute_time_diff_us(display_prep_start_time, display_prep_end_time));
                 }
             }
 
@@ -329,6 +307,7 @@ int main()
                 // tight_loop_contents();
                 sleep_us(10);
             }
+            display_render_end_time = get_absolute_time();
 
             // Frame display complete. Mark buffer as consumed and set its next target.
             int next_frame_to_target_for_this_buffer = (display_frame_idx + 2) % num_frames;
@@ -348,6 +327,11 @@ int main()
             {
                 playthroughs_completed_for_current_cycle++;
                 // printf("Playthrough %d completed.\n", playthroughs_completed_for_current_cycle);
+                loop_end_time = get_absolute_time();
+                printf("Profiling: SD Load: %lld us, Display Render: %lld us, Full Loop: %lld us\n",
+                       absolute_time_diff_us(sd_load_start_time, sd_load_end_time),
+                       absolute_time_diff_us(display_render_start_time, display_render_end_time),
+                       absolute_time_diff_us(loop_start_time, loop_end_time));
 
                 bool cycle_complete = false;
                 if (num_frames <= 25)
@@ -382,6 +366,14 @@ int main()
             // though sd_loader_process itself uses blocking f_read for chunks.
             // tight_loop_contents();
             sleep_us(100); // Small delay if not displaying, to yield a bit for loading
+            // If not displaying, still print SD load time and a marker for loop time if needed
+            loop_end_time = get_absolute_time();
+            if (!(buffer_ready[display_buffer_idx] && sd_loader_get_target_frame_for_buffer(display_buffer_idx) == display_frame_idx))
+            {
+                printf("Profiling (No Display): SD Load: %lld us, Loop: %lld us\n",
+                       absolute_time_diff_us(sd_load_start_time, sd_load_end_time),
+                       absolute_time_diff_us(loop_start_time, loop_end_time));
+            }
         }
     } // end while(1)
 
