@@ -2,27 +2,28 @@
 #define SD_LOADER_H
 
 #include "pico/stdlib.h"
-#include "ff.h"     // For FIL type
-#include <string.h> // For snprintf
+#include "ff.h" // For FIL type
 
 // Configurable chunk size for reading from SD card
 // Should be a multiple of 512 for efficiency, e.g., 4096, 8192
 #define SD_READ_CHUNK_SIZE (4 * 1024) // 4KB chunks
 
-// Define frame dimensions here as the authoritative source
+// These dimensions must match those used by the display logic in main.c
+// If main.c defines them, this module could extern them, or they can be duplicated.
+// For now, defining them here for clarity within the loader's scope of managing these buffers.
 #define FRAME_WIDTH 156
 #define FRAME_HEIGHT 156
 
 // Maximum number of frame filenames the manifest reader in main.c can handle.
 // This is used to size the pointer passed to sd_loader_init.
-#define MAX_FRAMES 460      // Must match main.c
+#define MAX_FRAMES 460 // Must match main.c
 #define MAX_FILENAME_LEN 64 // Must match main.c
 
-// Define the actual storage for frame buffers and ready flags
+// The double buffers for frame data, managed by this module
 extern uint16_t frame_buffers[2][FRAME_HEIGHT * FRAME_WIDTH];
-extern volatile bool buffer_ready[2]; // Make buffer_ready also accessible if main needs it (it does)
 
-// Internal state for the loader
+// Flags indicating if a buffer contains a fully loaded, ready-to-display frame
+extern volatile bool buffer_ready[2];
 
 /**
  * @brief Initializes the SD card loader module.

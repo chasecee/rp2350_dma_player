@@ -1,12 +1,11 @@
 #include <stdio.h>
 #include <string.h> // For strcpy, etc.
 #include "pico/stdlib.h"
-#include "ff.h"             // FatFS library
-#include "sd_card.h"        // SD card driver functions
-#include "bsp_co5300.h"     // CO5300 display driver
-#include "dma_config.h"     // Include the new DMA config header
-#include "sd_loader.h"      // Include the new SD loader module
-#include "display_module.h" // Include the new display module
+#include "ff.h"         // FatFS library
+#include "sd_card.h"    // SD card driver functions
+#include "bsp_co5300.h" // CO5300 display driver
+#include "dma_config.h" // Include the new DMA config header
+#include "sd_loader.h"  // Include the new SD loader module
 
 // Display dimensions (assuming 466x466 based on README)
 #define DISPLAY_WIDTH 466
@@ -17,7 +16,7 @@
 #define GREEN_COLOR 0xE007 // RGB565 green - Bytes swapped for CO5300
 #define BLUE_COLOR 0x1F00  // RGB565 blue - Bytes swapped for CO5300
 #define MAX_FILENAME_LEN 64
-#define MAX_FRAMES 460 // Max number of frames we can list in the manifest
+#define MAX_FRAMES 4000 // Max number of frames we can list in the manifest
 
 volatile bool dma_transfer_complete = true; // Flag for DMA completion (for display flushing)
 
@@ -87,60 +86,48 @@ void dma_done_callback(void)
 //     buffer_ready[next_buffer] = true;
 // }
 
-// Function to display a test pattern (using new display module)
-void display_test_pattern_main(void) // Renamed to avoid conflict if display_module had one
+// Function to display a test pattern
+void display_test_pattern(void)
 {
-    printf("Displaying test pattern (via main)\n");
-    uint16_t test_pattern_buffer[DISPLAY_WIDTH * DISPLAY_HEIGHT]; // Full frame buffer for simplicity
-
-    // Create a simple pattern: top half red, bottom half blue
+    printf("Displaying test pattern\n");
+    bsp_co5300_set_window(0, 0, DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1);
+    uint16_t test_pattern[DISPLAY_WIDTH];
+    for (int i = 0; i < DISPLAY_WIDTH; i++)
+    {
+        test_pattern[i] = (i % 2 == 0) ? RED_COLOR : BLUE_COLOR;
+    }
     for (int y = 0; y < DISPLAY_HEIGHT; y++)
     {
-        for (int x = 0; x < DISPLAY_WIDTH; x++)
+        while (!dma_transfer_complete)
         {
-            if (y < DISPLAY_HEIGHT / 2)
-            {
-                test_pattern_buffer[y * DISPLAY_WIDTH + x] = RED_COLOR;
-            }
-            else
-            {
-                test_pattern_buffer[y * DISPLAY_WIDTH + x] = BLUE_COLOR;
-            }
+            sleep_us(10);
         }
+        dma_transfer_complete = false;
+        bsp_co5300_flush(test_pattern, DISPLAY_WIDTH);
     }
-    // This is not how display_module_render_frame expects data.
-    // It expects a FRAME_WIDTH*FRAME_HEIGHT buffer and does scaling.
-    // For a direct test pattern like this, we'd need a different display_module function
-    // or draw directly to line buffers if display_module exposed that.
-    // For now, let's adapt this to send a "frame" that results in the pattern.
-    // This is a bit hacky for a test pattern.
-    // A better test pattern would use the frame_buffers and scaling.
-
-    // Simplified: Fill a frame buffer with a color and tell display_module to render it
-    // This won't be the same red/blue pattern as before without more complex setup
-    // that mimics frame_buffers structure.
-    // For now, just display a single color frame via the module.
-    uint16_t single_color_frame[FRAME_WIDTH * FRAME_HEIGHT];
-    for (int i = 0; i < FRAME_WIDTH * FRAME_HEIGHT; ++i)
-        single_color_frame[i] = GREEN_COLOR;
-
-    display_module_render_frame(single_color_frame); // Send it
-    printf("Test pattern (single green frame) display attempted.\n");
 }
 
 int main()
 {
     stdio_init_all();
     sleep_ms(2000);
-    printf("MINIMAL HELLO WORLD! Can you see me?\n");
+    printf("MINIMAL HELLO WORLD! Can you see me? (Attempting minimal display init)\n");
 
     // Initialize scaling tables - REMOVED
     // init_scaling_tables();
 
-    // Initialize Display using the new module
-    printf("Initializing display module...\n");
-    display_module_init(display_module_dma_done_callback); // Pass the callback from display_module
-    printf("Display module initialized (or crashed trying).\n");
+    // Initialize Display (minimal parameters)
+    printf("Initializing display (minimal parameters)...\n");
+    bsp_co5300_info_t display_info = {
+        .width = DISPLAY_WIDTH,
+        .height = DISPLAY_HEIGHT,
+        .x_offset = 6, // Adjusted based on working LVGL example
+        .y_offset = 0,
+        .brightness = 80,
+        .enabled_dma = true,
+        .dma_flush_done_callback = dma_done_callback};
+    bsp_co5300_init(&display_info);
+    printf("Display initialized (or crashed trying).\n");
 
     // Initialize SD DMA (must be done after display potentially claims DMA_IRQ_0)
     printf("Initializing SD DMA...\n");
@@ -174,35 +161,25 @@ int main()
     // Debug: List root directory contents
     DIR dir;
     FILINFO fno;
-    const char *paths_to_list[] = {"/", "/output", "/output/000"}; // MODIFIED
-    int num_paths_to_list = sizeof(paths_to_list) / sizeof(paths_to_list[0]);
-
-    for (int p_idx = 0; p_idx < num_paths_to_list; ++p_idx)
+    fr = f_opendir(&dir, "");
+    if (fr == FR_OK)
     {
-        fr = f_opendir(&dir, paths_to_list[p_idx]);
-        if (fr == FR_OK)
+        printf("Root directory contents:\n");
+        while (1)
         {
-            printf("Listing directory: %s\n", paths_to_list[p_idx]);
-            while (1)
-            {
-                fr = f_readdir(&dir, &fno);
-                if (fr != FR_OK || fno.fname[0] == 0)
-                    break;
-                printf("  %s%s\n", fno.fname, (fno.fattrib & AM_DIR) ? "/" : "");
-            }
-            f_closedir(&dir);
+            fr = f_readdir(&dir, &fno);
+            if (fr != FR_OK || fno.fname[0] == 0)
+                break;
+            printf("  %s%s\n", fno.fname, (fno.fattrib & AM_DIR) ? "/" : "");
         }
-        else
-        {
-            printf("Failed to open directory: %s (Error %d)\n", paths_to_list[p_idx], fr);
-        }
-    } // END OF MODIFIED SECTION
+        f_closedir(&dir);
+    }
 
     printf("Finished SD card initialization. Entering main loop.\n");
     // --- END OF SD CARD CODE ---
 
     // Display a test pattern to verify display functionality
-    // display_test_pattern_main(); // Can be enabled for testing
+    // display_test_pattern(); // Can be enabled for testing
 
     printf("Attempting to load animation from manifest.txt...\n");
 
@@ -225,8 +202,8 @@ int main()
             // Remove newline characters if any
             frame_filenames[num_frames][strcspn(frame_filenames[num_frames], "\r\n")] = 0;
             if (strlen(frame_filenames[num_frames]) > 0)
-            {                                                                                 // Ensure it's not an empty line
-                printf("Manifest entry %d: [%s]\n", num_frames, frame_filenames[num_frames]); // MODIFIED
+            { // Ensure it's not an empty line
+                printf("Found frame: %s\n", frame_filenames[num_frames]);
                 num_frames++;
             }
         }
@@ -237,31 +214,25 @@ int main()
     if (num_frames == 0)
     {
         printf("No frames loaded from manifest or manifest not found. Halting with error colors.\n");
-        uint16_t error_colors[] = {RED_COLOR, BLUE_COLOR, GREEN_COLOR};
+        uint16_t error_colors[] = {RED_COLOR, BLUE_COLOR, GREEN_COLOR}; // Added green for manifest error
         int error_color_index = 0;
-        // This error display logic will be simplified or moved.
-        // For now, it cannot directly use display_module_render_frame as it bypasses sd_loader buffers.
-        // A dedicated error display function in display_module might be better.
-        // Or, have this main loop construct a simple error "frame" and use display_module_render_frame.
-
-        // Temporary direct bsp_co5300 use for error screen - this needs fixing
-        // if we want to strictly use display_module for all display access.
-        // For now, let's assume this is acceptable as it's a fatal error state.
-        bsp_co5300_info_t display_info; // Need to re-init or ensure it's still valid.
-                                        // This is problematic. Better to have display_module_show_error_pattern(...).
-                                        // For quick fix, let's try to make an error frame.
-        uint16_t error_frame_content[FRAME_WIDTH * FRAME_HEIGHT];
-
         while (1)
         {
-            // Fill the error_frame_content with a solid color
-            for (int i = 0; i < FRAME_WIDTH * FRAME_HEIGHT; ++i)
-                error_frame_content[i] = error_colors[error_color_index];
-
-            // Use display_module to show this "error frame"
-            // This will scale the small error_frame_content to the full display.
-            display_module_render_frame(error_frame_content);
-
+            bsp_co5300_set_window(0, 0, DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1); // Full screen for error
+            uint16_t error_line_buffer[DISPLAY_WIDTH];                          // Full width for error
+            for (int i = 0; i < DISPLAY_WIDTH; i++)
+            {
+                error_line_buffer[i] = error_colors[error_color_index];
+            }
+            for (int y = 0; y < DISPLAY_HEIGHT; y++) // Full height for error
+            {
+                while (!dma_transfer_complete)
+                {
+                    sleep_us(10);
+                }
+                dma_transfer_complete = false;
+                bsp_co5300_flush(error_line_buffer, DISPLAY_WIDTH); // Full width for error
+            }
             error_color_index = (error_color_index + 1) % 3;
             sleep_ms(333);
         }
@@ -284,7 +255,7 @@ int main()
     // UINT bytes_read_for_full_frame; // Not needed with chunked loading this way
     // char current_frame_full_path[MAX_FILENAME_LEN + 8]; // Handled by sd_loader
 
-    printf("Starting scaled animation loop with %d frames.\n", num_frames);
+    printf("Starting scaled animation loop with %d frames (chunked loading).\n", num_frames);
 
     // Pre-load first frame into buffer 0 - REMOVED (handled by sd_loader_process calls)
     // snprintf(current_frame_full_path, sizeof(current_frame_full_path), "output/%s", frame_filenames[0]);
@@ -304,55 +275,115 @@ int main()
 
     while (1)
     {
+        // Process SD card loading - this will load chunks into buffers if needed
         sd_loader_process();
 
+        // Check if the buffer we expect to display from is ready and contains the correct frame
         if (buffer_ready[display_buffer_idx] &&
             sd_loader_get_target_frame_for_buffer(display_buffer_idx) == display_frame_idx)
         {
-            // Frame is ready in the expected buffer!
-            // The actual frame_buffers are now globally accessible via sd_loader.h (if made extern)
-            // or sd_loader provides a getter. sd_loader.c has `uint16_t frame_buffers[2][FRAME_HEIGHT * FRAME_WIDTH];`
-            // We need access to this. Let's assume sd_loader.h will expose `extern uint16_t frame_buffers[2][FRAME_HEIGHT * FRAME_WIDTH];`
+            // printf("Displaying frame %d from buffer_idx %d\n", display_frame_idx, display_buffer_idx);
+            bsp_co5300_set_window(0, 0, DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1);
 
-            // printf("Displaying frame %d from sd_loader buffer_idx %d\n", display_frame_idx, display_buffer_idx);
-            display_module_render_frame(frame_buffers[display_buffer_idx]); // Pass pointer to the correct full frame buffer
+            cpu_buffer_ptr = frame_line_buffer_a;
+            dma_buffer_ptr = frame_line_buffer_b;
+
+            // Prime the first buffer for DMA (display line 0)
+            // Scaled drawing: for display line y=0
+            int sy_scaled = (0 * FRAME_HEIGHT) / DISPLAY_HEIGHT; // Effective source y for display y=0
+            for (int dx = 0; dx < DISPLAY_WIDTH; ++dx)
+            {
+                int sx_scaled = (dx * FRAME_WIDTH) / DISPLAY_WIDTH; // Effective source x for display x
+                cpu_buffer_ptr[dx] = frame_buffers[display_buffer_idx][sy_scaled * FRAME_WIDTH + sx_scaled];
+            }
+
+            for (int y = 0; y < DISPLAY_HEIGHT; y++)
+            {
+                volatile uint16_t *temp_buf = dma_buffer_ptr;
+                dma_buffer_ptr = cpu_buffer_ptr;
+                cpu_buffer_ptr = temp_buf;
+
+                while (!dma_transfer_complete)
+                {
+                    // tight_loop_contents(); // prefer sleep_us for potentially yielding
+                    sleep_us(10);
+                }
+                dma_transfer_complete = false;
+                bsp_co5300_flush((uint16_t *)dma_buffer_ptr, DISPLAY_WIDTH);
+
+                if (y < DISPLAY_HEIGHT - 1)
+                {
+                    int display_y_next = y + 1;
+                    // Scaled drawing for the next line
+                    sy_scaled = (display_y_next * FRAME_HEIGHT) / DISPLAY_HEIGHT; // Effective source y for next display y
+                    for (int dx = 0; dx < DISPLAY_WIDTH; ++dx)
+                    {
+                        int sx_scaled = (dx * FRAME_WIDTH) / DISPLAY_WIDTH; // Effective source x for display x
+                        cpu_buffer_ptr[dx] = frame_buffers[display_buffer_idx][sy_scaled * FRAME_WIDTH + sx_scaled];
+                    }
+                }
+            }
+
+            while (!dma_transfer_complete)
+            {
+                // tight_loop_contents();
+                sleep_us(10);
+            }
 
             // Frame display complete. Mark buffer as consumed and set its next target.
             int next_frame_to_target_for_this_buffer = (display_frame_idx + 2) % num_frames;
-            if (num_frames < 2) // If 0 or 1 frame, always target 0 (or -1 if 0 frames, but num_frames > 0 here)
-                next_frame_to_target_for_this_buffer = (num_frames == 0) ? -1 : 0;
+            if (num_frames == 1)
+                next_frame_to_target_for_this_buffer = 0; // Special case for single frame
 
             // printf("Main: Displayed frame %d from buffer %d. Next target for this buffer: frame %d\n",
             //        display_frame_idx, display_buffer_idx, next_frame_to_target_for_this_buffer);
             sd_loader_mark_buffer_consumed(display_buffer_idx, next_frame_to_target_for_this_buffer);
 
+            // Advance to next frame and buffer for display
             display_frame_idx = (display_frame_idx + 1) % num_frames;
-            display_buffer_idx = 1 - display_buffer_idx;
+            display_buffer_idx = 1 - display_buffer_idx; // Flip to other buffer
 
+            // Playthrough logic
             if (display_frame_idx == 0)
             {
                 playthroughs_completed_for_current_cycle++;
                 // printf("Playthrough %d completed.\n", playthroughs_completed_for_current_cycle);
 
                 bool cycle_complete = false;
-                // Simplified playthrough logic: play 2 times if few frames, 1 time if many.
-                int plays_before_pause = (num_frames <= 25 && num_frames > 0) ? 2 : 1;
-
-                if (playthroughs_completed_for_current_cycle >= plays_before_pause)
+                if (num_frames <= 25)
                 {
-                    printf("Cycle complete (%d plays of %d frames). Pausing...\n", playthroughs_completed_for_current_cycle, num_frames);
+                    if (playthroughs_completed_for_current_cycle >= 2)
+                    {
+                        cycle_complete = true;
+                    }
+                }
+                else
+                {
+                    if (playthroughs_completed_for_current_cycle >= 1)
+                    {
+                        cycle_complete = true;
+                    }
+                }
+
+                if (cycle_complete)
+                {
+                    printf("Cycle complete. Pausing...\n");
                     playthroughs_completed_for_current_cycle = 0;
-                    sleep_ms(2000); // Pause for 2 seconds
+                    sleep_ms(2000);
                 }
             }
         }
         else
         {
-            // Expected buffer not ready or contains wrong frame.
+            // Expected buffer not ready or contains wrong frame, or still loading.
             // sd_loader_process() will continue trying to load.
-            sleep_us(100); // Small delay to yield for loading
+            // We can add a small delay here if the display loop is too tight
+            // and not giving enough time for sd_loader_process to work effectively,
+            // though sd_loader_process itself uses blocking f_read for chunks.
+            // tight_loop_contents();
+            sleep_us(100); // Small delay if not displaying, to yield a bit for loading
         }
     } // end while(1)
 
-    return 0; // Should not be reached
+    return 0;
 }

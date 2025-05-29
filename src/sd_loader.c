@@ -61,48 +61,26 @@ void sd_loader_process(void)
         if (!loading_in_progress[i])
         {
             // Not currently loading this buffer, and it's not ready. Try to start a new load.
-            char current_frame_full_path[MAX_FILENAME_LEN + 8];
+            char current_frame_full_path[MAX_FILENAME_LEN + 8]; // "output/" + filename + null
             snprintf(current_frame_full_path, sizeof(current_frame_full_path), "output/%s",
                      g_frame_filenames[frame_target_for_buffer[i]]);
 
-            printf("SD Loader: Buffer %d, Prep open: [%s] (Target Frame %d)\n",
-                   i, current_frame_full_path, frame_target_for_buffer[i]);
-            fflush(stdout);
+            // printf("SD Loader: Attempting to open %s for buffer %d (target frame %d)\n",
+            //        current_frame_full_path, i, frame_target_for_buffer[i]);
 
-            FILINFO fno_stat_check;
-            printf("SD Loader: Buffer %d, Attempt f_stat on: [%s]\n", i, current_frame_full_path);
-            fflush(stdout);
-            FRESULT fr_stat = f_stat(current_frame_full_path, &fno_stat_check);
-            if (fr_stat == FR_OK)
-            {
-                printf("SD Loader: Buffer %d, f_stat OK for [%s], size: %lu, attr: 0x%02X\n", i, current_frame_full_path, fno_stat_check.fsize, fno_stat_check.fattrib);
-            }
-            else
-            {
-                printf("SD Loader: Buffer %d, f_stat FAILED for [%s] with error %d\n", i, current_frame_full_path, fr_stat);
-            }
-            fflush(stdout);
-
-            printf("SD Loader: Buffer %d, BEFORE f_open for [%s]\n", i, current_frame_full_path);
-            fflush(stdout);
             FRESULT fr = f_open(&file_object_for_load[i], current_frame_full_path, FA_READ);
-            printf("SD Loader: Buffer %d, AFTER f_open for [%s], result: %d\n", i, current_frame_full_path, fr);
-            fflush(stdout);
-
             if (fr == FR_OK)
             {
-                printf("SD Loader: Buffer %d, Successfully opened [%s]\n", i, current_frame_full_path);
-                fflush(stdout);
+                // printf("SD Loader: Successfully opened %s for buffer %d.\n", current_frame_full_path, i);
                 loading_in_progress[i] = true;
                 bytes_loaded_current_attempt[i] = 0;
                 // First chunk will be read in the next block
             }
             else
             {
-                printf("SD Loader: Buffer %d, ERROR Failed to open [%s]. FatFS error: %d\n",
-                       i, current_frame_full_path, fr);
-                fflush(stdout);
-                frame_target_for_buffer[i] = -1;
+                printf("SD Loader: ERROR Failed to open %s for buffer %d. FatFS error: %d\n",
+                       current_frame_full_path, i, fr);
+                frame_target_for_buffer[i] = -1; // Mark as bad target for now to prevent spamming
                 continue;
             }
         }
