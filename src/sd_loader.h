@@ -6,24 +6,28 @@
 
 // Configurable chunk size for reading from SD card
 // Should be a multiple of 512 for efficiency, e.g., 4096, 8192
-#define SD_READ_CHUNK_SIZE (FRAME_WIDTH * FRAME_HEIGHT * 2) // Full frame size
+// #define SD_READ_CHUNK_SIZE (FRAME_WIDTH * FRAME_HEIGHT * 2) // Full frame size (16-bit pixels)
+#define SD_READ_CHUNK_SIZE 16384 // A more typical chunk size
 
 // These dimensions must match those used by the display logic in main.c
 // If main.c defines them, this module could extern them, or they can be duplicated.
 // For now, defining them here for clarity within the loader's scope of managing these buffers.
-#define FRAME_WIDTH 288
-#define FRAME_HEIGHT 288
+#define FRAME_WIDTH 156  // Corrected to match actual BIN file size
+#define FRAME_HEIGHT 156 // Corrected to match actual BIN file size
 
 // Maximum number of frame filenames the manifest reader in main.c can handle.
 // This is used to size the pointer passed to sd_loader_init.
-#define MAX_FRAMES 460      // Must match main.c
-#define MAX_FILENAME_LEN 64 // Must match main.c
+#define MAX_FRAMES_IN_MANIFEST 100 // Renamed for clarity from previous MAX_FRAMES
+#define MAX_FILENAME_LEN_SD 64     // Renamed for clarity
 
-// The double buffers for frame data, managed by this module
-extern uint16_t frame_buffers[2][FRAME_HEIGHT * FRAME_WIDTH];
+// Buffer for one full frame (16-bit RGB565 pixels)
+// extern uint16_t frame_buffers[2][FRAME_HEIGHT * FRAME_WIDTH]; // Old 16-bit
+// extern uint8_t frame_buffers[2][FRAME_HEIGHT * FRAME_WIDTH]; // New 8-bit
+extern uint8_t frame_buffers[2][FRAME_HEIGHT * FRAME_WIDTH]; // Changed to uint8_t
 
 // Flags indicating if a buffer contains a fully loaded, ready-to-display frame
 extern volatile bool buffer_ready[2];
+extern volatile int target_frame_for_buffer[2];
 
 /**
  * @brief Initializes the SD card loader module.
@@ -31,7 +35,7 @@ extern volatile bool buffer_ready[2];
  * @param frame_filenames_ptr Pointer to the array of frame filenames.
  * @param num_total_frames Total number of frames available as per the manifest.
  */
-void sd_loader_init(const char (*frame_filenames_ptr)[MAX_FILENAME_LEN], int num_total_frames);
+void sd_loader_init(char frame_filenames[][MAX_FILENAME_LEN_SD], int num_files);
 
 /**
  * @brief Processes a chunk of SD card loading.
@@ -56,6 +60,6 @@ int sd_loader_get_target_frame_for_buffer(int buffer_idx);
  * @param buffer_idx The buffer index (0 or 1) that was consumed.
  * @param next_frame_to_target_for_this_buffer The frame index (from manifest) that this buffer should now load.
  */
-void sd_loader_mark_buffer_consumed(int buffer_idx, int next_frame_to_target_for_this_buffer);
+void sd_loader_mark_buffer_consumed(int buffer_idx, int next_target_frame);
 
 #endif // SD_LOADER_H

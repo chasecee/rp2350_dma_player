@@ -7,7 +7,7 @@ static spi_t spi = {
     .sck_gpio = 2,   // GPIO number (not Pico pin number)
     .mosi_gpio = 3,
     .miso_gpio = 4,
-    .baud_rate = 150 * 1000 * 1000 / 6, // New: 25 MHz with 150MHz clk_sys
+    .baud_rate = 150 * 1000 * 1000 / 3, // Cranked to 50 MHz with 150MHz clk_sys (YOLO!)
     .spi_mode = 3                       // Explicitly set to SPI Mode 3
     // Other spi_t fields will be default (0/false) if not specified
 };

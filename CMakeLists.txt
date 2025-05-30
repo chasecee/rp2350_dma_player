@@ -16,6 +16,10 @@ set(PICO_BOARD pico2 CACHE STRING "Board type")
 set(PICO_PLATFORM rp2350 CACHE STRING "Target platform")
 
 cmake_minimum_required(VERSION 3.13)
+
+# Force the build type to Release
+set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type (Release, Debug, MinSizeRel, RelWithDebInfo)" FORCE)
+
 include(pico_sdk_import.cmake)
 
 project(rp2350_dma_player C CXX ASM)

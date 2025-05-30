@@ -139,7 +139,7 @@ static void bsp_co5300_reg_init(void)
         {.reg = 0x51, .data = (uint8_t[]){0xA0}, .data_bytes = 1, .delay_ms = 0},
         {.reg = 0x20, .data = (uint8_t[]){0x00}, .data_bytes = 0, .delay_ms = 0},
         {.reg = 0x36, .data = (uint8_t[]){0x00}, .data_bytes = 1, 0},
-        {.reg = 0x3A, .data = (uint8_t[]){0x05}, .data_bytes = 1, .delay_ms = 0},
+        {.reg = 0x3A, .data = (uint8_t[]){0x02}, .data_bytes = 1, .delay_ms = 0}, // 0x02 is for 8-bit RGB332 (SPI 3-3-2 / pixel as per datasheet)
     };
 
     bsp_co5300_tx_cmd(co5300_init_cmds, sizeof(co5300_init_cmds) / sizeof(bsp_co5300_cmd_t));
@@ -198,10 +198,10 @@ void bsp_co5300_set_window(uint16_t x_start, uint16_t y_start, uint16_t x_end, u
     bsp_co5300_tx_cmd(cmds, 3);
 }
 
-void bsp_co5300_flush(uint16_t *color, size_t color_len)
+void bsp_co5300_flush(uint8_t *color_data, size_t num_pixels)
 {
     // static uint32_t flush_pixel_sum = 0;
-    // flush_pixel_sum += color_len;
+    // flush_pixel_sum += num_pixels;
 
     // if (flush_pixel_sum >= g_co5300_info->width * g_co5300_info->height)
     // {
@@ -219,15 +219,15 @@ void bsp_co5300_flush(uint16_t *color, size_t color_len)
         // CS and DC are now managed externally for frame pixel data
         // gpio_put(BSP_CO5300_CS_PIN, 0); // REMOVED
         // gpio_put(BSP_CO5300_DC_PIN, 1); // REMOVED
-        dma_channel_set_read_addr(g_co5300_info->dma_tx_channel, color, false);
-        dma_channel_set_trans_count(g_co5300_info->dma_tx_channel, color_len * 2, true);
+        dma_channel_set_read_addr(g_co5300_info->dma_tx_channel, color_data, false);
+        dma_channel_set_trans_count(g_co5300_info->dma_tx_channel, num_pixels, true);
     }
     else
     {
         // For non-DMA, also assume CS/DC is handled externally for consistency during frame writes
         // gpio_put(BSP_CO5300_CS_PIN, 0); // REMOVED
         // gpio_put(BSP_CO5300_DC_PIN, 1); // REMOVED
-        spi_write_blocking(BSP_CO5300_SPI_NUM, (uint8_t *)color, color_len * 2);
+        spi_write_blocking(BSP_CO5300_SPI_NUM, color_data, num_pixels);
         // gpio_put(BSP_CO5300_CS_PIN, 1); // REMOVED
     }
 }
