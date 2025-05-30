@@ -15,10 +15,12 @@
 #define PHYSICAL_DISPLAY_HEIGHT 466
 #define FRAME_WIDTH 156
 #define FRAME_HEIGHT 156
-#define SCALED_WIDTH (FRAME_WIDTH * 2)   // 312
-#define SCALED_HEIGHT (FRAME_HEIGHT * 2) // 312
-#define DISPLAY_WIDTH SCALED_WIDTH       // Use scaled dimensions
-#define DISPLAY_HEIGHT SCALED_HEIGHT     // Use scaled dimensions
+#define DISPLAY_WIDTH PHYSICAL_DISPLAY_WIDTH
+#define DISPLAY_HEIGHT PHYSICAL_DISPLAY_HEIGHT
+
+// Scaling factors (fixed point with 8 bits of fraction)
+#define SCALE_FACTOR_X ((DISPLAY_WIDTH << 8) / FRAME_WIDTH)
+#define SCALE_FACTOR_Y ((DISPLAY_HEIGHT << 8) / FRAME_HEIGHT)
 
 // RGB332 Color definitions
 #define RED_COLOR_RGB332 0xE0   // 11100000
@@ -49,17 +51,22 @@ void dma_done_callback(void)
 // Function to initialize precomputed scaling maps
 void init_scaling_maps(void)
 {
-    printf("Initializing 2x scaling maps...\n");
-    // Not needed for integer scaling, but keep for future flexibility
+    printf("Initializing scaling maps for %dx%d -> %dx%d...\n",
+           FRAME_WIDTH, FRAME_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+
+    // Precompute source Y coordinates for each destination Y
     for (int i = 0; i < DISPLAY_HEIGHT; i++)
     {
-        source_y_map[i] = i >> 1; // Divide by 2
+        source_y_map[i] = (i * FRAME_HEIGHT) / DISPLAY_HEIGHT;
     }
+
+    // Precompute source X coordinates for each destination X
     for (int i = 0; i < DISPLAY_WIDTH; i++)
     {
-        source_x_map[i] = i >> 1; // Divide by 2
+        source_x_map[i] = (i * FRAME_WIDTH) / DISPLAY_WIDTH;
     }
-    printf("2x scaling maps initialized.\n");
+
+    printf("Scaling maps initialized.\n");
 }
 
 // Function to clear the entire physical screen to black
@@ -138,9 +145,9 @@ int main()
     // Initialize Display (minimal parameters)
     printf("MAIN: Initializing display...\n");
     bsp_co5300_info_t display_info = {
-        .width = PHYSICAL_DISPLAY_WIDTH,   // Use physical dimensions for init
-        .height = PHYSICAL_DISPLAY_HEIGHT, // Use physical dimensions for init
-        .x_offset = 6,                     // Adjusted based on working LVGL example
+        .width = PHYSICAL_DISPLAY_WIDTH,
+        .height = PHYSICAL_DISPLAY_HEIGHT,
+        .x_offset = 6,
         .y_offset = 0,
         .brightness = 95,
         .enabled_dma = true,
@@ -278,7 +285,8 @@ int main()
     // UINT bytes_read_for_full_frame; // Not needed with chunked loading this way
     // char current_frame_full_path[MAX_FILENAME_LEN + 8]; // Handled by sd_loader
 
-    printf("Starting 8-bit RGB332 animation loop (%d frames, %dx%d -> %dx%d).\n", num_frames, FRAME_WIDTH, FRAME_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    printf("Starting 8-bit RGB332 animation loop (%d frames, %dx%d -> %dx%d).\n",
+           num_frames, FRAME_WIDTH, FRAME_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
     // Pre-load first frame into buffer 0 - REMOVED (handled by sd_loader_process calls)
     // snprintf(current_frame_full_path, sizeof(current_frame_full_path), "output/%s", frame_filenames[0]);
@@ -290,67 +298,77 @@ int main()
     //     if (fr == FR_OK) buffer_ready[0] = true; // Old buffer_ready
     // }
 
-    int display_frame_idx = 0;  // The frame index we intend to display next
-    int display_buffer_idx = 0; // The buffer (0 or 1) we expect to find display_frame_idx in
+    int display_frame_idx = 0;
+    int display_buffer_idx = 0;
 
-    // Calculate offsets for centering 312x312 content on 466x466 display
-    const int x_offset_centered = (PHYSICAL_DISPLAY_WIDTH - SCALED_WIDTH) / 2;
-    const int y_offset_centered = (PHYSICAL_DISPLAY_HEIGHT - SCALED_HEIGHT) / 2;
+    // Pre-calculate scaling lookup tables
+    uint32_t *y_offset_table = malloc(DISPLAY_HEIGHT * sizeof(uint32_t));
+    for (int y = 0; y < DISPLAY_HEIGHT; y++)
+    {
+        y_offset_table[y] = source_y_map[y] * FRAME_WIDTH;
+    }
 
-    printf("Entering main display & loader loop (2x scaling)\n");
+    // Allocate line buffer for scaled output
+    uint8_t *scaled_line_buffer = malloc(DISPLAY_WIDTH);
+    if (!scaled_line_buffer)
+    {
+        printf("Failed to allocate line buffer!\n");
+        while (1)
+            tight_loop_contents();
+    }
 
-    absolute_time_t loop_start_time, loop_end_time;
-    absolute_time_t sd_load_start_time, sd_load_end_time;
-    absolute_time_t display_prep_start_time, display_prep_end_time;
-    absolute_time_t display_render_start_time, display_render_end_time;
+    // No need for centering offsets since we're using full display
+    const int x_offset = 0;
+    const int y_offset = 0;
 
-    // Allocate line buffers for 2x scaling
-    uint8_t scaled_line_buffer[SCALED_WIDTH];
+    printf("Entering main display & loader loop (full resolution scaling)\n");
+
+    absolute_time_t frame_start_time = get_absolute_time();
+    const uint32_t target_frame_us = 33333; // Target ~30fps (33.333ms)
 
     while (1)
     {
-        loop_start_time = get_absolute_time();
-
-        // Process SD card loading
-        sd_load_start_time = get_absolute_time();
+        // Process SD card loading first
         sd_loader_process();
-        sd_load_end_time = get_absolute_time();
 
-        if (buffer_ready[display_buffer_idx] &&
-            sd_loader_get_target_frame_for_buffer(display_buffer_idx) == display_frame_idx)
+        // Check if either buffer has the frame we want to display
+        int buffer_with_frame = -1;
+        if (buffer_ready[0] && sd_loader_get_target_frame_for_buffer(0) == display_frame_idx)
         {
-            display_render_start_time = get_absolute_time();
+            buffer_with_frame = 0;
+        }
+        else if (buffer_ready[1] && sd_loader_get_target_frame_for_buffer(1) == display_frame_idx)
+        {
+            buffer_with_frame = 1;
+        }
 
-            // Set up display window for scaled content
-            bsp_co5300_set_window(x_offset_centered, y_offset_centered,
-                                  x_offset_centered + SCALED_WIDTH - 1,
-                                  y_offset_centered + SCALED_HEIGHT - 1);
+        if (buffer_with_frame >= 0)
+        {
+            // Set up display window for full content
+            bsp_co5300_set_window(x_offset, y_offset,
+                                  x_offset + DISPLAY_WIDTH - 1,
+                                  y_offset + DISPLAY_HEIGHT - 1);
             bsp_co5300_prepare_for_frame_pixels();
 
-            // Render frame with 2x scaling
-            uint8_t *src_buffer = (uint8_t *)frame_buffers[display_buffer_idx];
+            // Get pointer to source frame
+            uint8_t *src_buffer = frame_buffers[buffer_with_frame];
 
-            for (int y = 0; y < FRAME_HEIGHT; y++)
+            // Render frame with proper scaling - optimized inner loop
+            for (int y = 0; y < DISPLAY_HEIGHT; y++)
             {
-                // Scale each source line to 2x width
-                for (int x = 0; x < FRAME_WIDTH; x++)
+                const uint32_t src_y_offset = y_offset_table[y];
+
+                // Scale each line
+                for (int x = 0; x < DISPLAY_WIDTH; x++)
                 {
-                    uint8_t pixel = src_buffer[y * FRAME_WIDTH + x];
-                    // Each source pixel becomes 2x2 pixels
-                    scaled_line_buffer[x * 2] = pixel;
-                    scaled_line_buffer[x * 2 + 1] = pixel;
+                    scaled_line_buffer[x] = src_buffer[src_y_offset + source_x_map[x]];
                 }
 
-                // Output the scaled line twice for 2x vertical scaling
+                // Output the scaled line
                 while (!dma_transfer_complete)
                     tight_loop_contents();
                 dma_transfer_complete = false;
-                bsp_co5300_flush(scaled_line_buffer, SCALED_WIDTH);
-
-                while (!dma_transfer_complete)
-                    tight_loop_contents();
-                dma_transfer_complete = false;
-                bsp_co5300_flush(scaled_line_buffer, SCALED_WIDTH);
+                bsp_co5300_flush(scaled_line_buffer, DISPLAY_WIDTH);
             }
 
             // Wait for the last DMA transfer
@@ -358,50 +376,33 @@ int main()
                 tight_loop_contents();
             bsp_co5300_finish_frame_pixels();
 
-            display_render_end_time = get_absolute_time();
-
             // Frame display complete, advance to next
             int next_frame_to_target = display_frame_idx + 2;
 
-            // Handle frame wrapping
-            if (next_frame_to_target >= num_frames)
-            {
-                printf("Main loop wrapping from frame %d back to %d (total frames: %d)\n",
-                       next_frame_to_target, next_frame_to_target % num_frames, num_frames);
-            }
-
             // Mark current buffer as consumed and set its next target
-            sd_loader_mark_buffer_consumed(display_buffer_idx, next_frame_to_target);
+            sd_loader_mark_buffer_consumed(buffer_with_frame, next_frame_to_target % num_frames);
 
-            // Advance to next frame, ensuring we wrap around properly
+            // Advance to next frame
             display_frame_idx = (display_frame_idx + 1) % num_frames;
 
-            // Switch to other buffer
-            display_buffer_idx = 1 - display_buffer_idx;
+            // Frame timing control
+            absolute_time_t now = get_absolute_time();
+            int64_t frame_time = absolute_time_diff_us(frame_start_time, now);
 
-            // Print profiling info at the end of each loop
-            if (display_frame_idx == 0) // This signifies a completed playthrough
+            if (frame_time < target_frame_us)
             {
-                loop_end_time = get_absolute_time();
-                printf("LOOP_COMPLETE: SD Load: %lld us, Display Render: %lld us, Full Loop: %lld us\n",
-                       absolute_time_diff_us(sd_load_start_time, sd_load_end_time),
-                       absolute_time_diff_us(display_render_start_time, display_render_end_time),
-                       absolute_time_diff_us(loop_start_time, loop_end_time));
+                // We rendered faster than target frame time, sleep for remainder
+                sleep_us(target_frame_us - frame_time);
             }
+
+            frame_start_time = get_absolute_time();
         }
         else
         {
-            // Expected buffer not ready or contains wrong frame
+            // No buffer has our frame yet - just keep processing
             tight_loop_contents();
-
-            // Print debug info
-            loop_end_time = get_absolute_time();
-            printf("WAITING: buf_idx=%d, frame_idx=%d, B0_ready=%d,T0=%d, B1_ready=%d,T1=%d\n",
-                   display_buffer_idx, display_frame_idx,
-                   buffer_ready[0], sd_loader_get_target_frame_for_buffer(0),
-                   buffer_ready[1], sd_loader_get_target_frame_for_buffer(1));
         }
-    } // end while(1)
+    }
 
     return 0;
 }

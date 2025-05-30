@@ -3,6 +3,7 @@
 #include <stdio.h>          // For printf
 #include <string.h>         // For snprintf
 #include "hardware/timer.h" // For profiling (optional)
+#include "dma_config.h"     // Use existing DMA infrastructure
 
 // Frame dimensions (must match main.c or be passed in)
 // Assuming FRAME_WIDTH and FRAME_HEIGHT are defined in sd_loader.h or globally
@@ -48,8 +49,8 @@
 #define CHUNK_SIZE_BYTES SD_BUFFER_SIZE // Read the whole frame at once
 
 // Define the actual storage for frame buffers and ready flags
-// These are defined as extern in sd_loader.h and used by main.c for display
-uint8_t frame_buffers[2][SD_BUFFER_SIZE]; // Changed to uint8_t
+// Aligned to 32-byte boundary for optimal DMA performance
+__attribute__((aligned(32))) uint8_t frame_buffers[2][FRAME_HEIGHT * FRAME_WIDTH];
 volatile bool buffer_ready[2] = {false, false};
 volatile int target_frame_for_buffer[2] = {-1, -1}; // -1 indicates no specific target initially
 
@@ -65,6 +66,23 @@ static struct
     bool file_is_open;
 } loader_state;
 
+// Track timing for adaptive loading
+static uint32_t last_frame_load_time = 0;
+static uint32_t avg_load_time = 0;
+static uint32_t frame_count = 0;
+
+// DMA channel for SD card reads
+// static uint dma_chan;
+// static dma_channel_config dma_config;
+// static void dma_complete_handler() { ... }
+
+#define SECTOR_SIZE 512 // Standard SD card sector size
+#define FRAME_SIZE (FRAME_WIDTH * FRAME_HEIGHT)
+#define SECTORS_PER_FRAME ((FRAME_SIZE + SECTOR_SIZE - 1) / SECTOR_SIZE)
+
+// Attempt to read multiple frames at once if they fit in our chunk size
+#define MAX_FRAMES_PER_READ ((SD_READ_CHUNK_SIZE) / FRAME_SIZE)
+
 void sd_loader_init(int total_frames)
 {
     printf("SD_LOADER: Initializing with %d frames.\n", total_frames);
@@ -75,26 +93,30 @@ void sd_loader_init(int total_frames)
         return;
     }
 
-    // Initial targets
-    target_frame_for_buffer[0] = 0;
-    if (total_frames > 1)
-    {
-        target_frame_for_buffer[1] = 1;
-    }
-    else
+    // Reset buffer states
+    buffer_ready[0] = false;
+    buffer_ready[1] = false;
+
+    // Set initial targets for double buffering
+    target_frame_for_buffer[0] = 0; // First buffer targets frame 0
+    target_frame_for_buffer[1] = 1; // Second buffer targets frame 1 (or 0 if only one frame)
+    if (total_frames == 1)
     {
         target_frame_for_buffer[1] = 0; // Loop frame 0 if only one frame
     }
 
+    // Reset loader state
     loader_state.file_is_open = false;
-    loader_state.current_buffer_idx = -1;
-    loader_state.current_frame_to_load_idx = -1;
+    loader_state.current_buffer_idx = -1;        // No buffer being loaded yet
+    loader_state.current_frame_to_load_idx = -1; // No frame being loaded yet
     loader_state.current_file_offset = 0;
     loader_state.current_file_total_size_bytes = 0;
-    buffer_ready[0] = false;
-    buffer_ready[1] = false;
 
-    printf("SD_LOADER: Init complete.\n");
+    // Initialize the shared DMA channel
+    init_sd_dma();
+
+    printf("SD_LOADER: Init complete. Buffer 0 target: %d, Buffer 1 target: %d\n",
+           target_frame_for_buffer[0], target_frame_for_buffer[1]);
 }
 
 // Attempts to open the file designated by frame_idx_to_load for buffer_idx_to_load.
@@ -167,116 +189,120 @@ void sd_loader_process(void)
     if (loader_state.total_manifest_frames == 0)
         return;
 
+    // If we're in the middle of loading a frame, continue with that
+    if (loader_state.file_is_open && loader_state.current_buffer_idx != -1)
+    {
+        goto continue_current_load;
+    }
+
+    // Find a buffer that needs loading
     int buffer_to_process = -1;
 
-    // Prioritize buffer 0 if it needs loading
-    if (!buffer_ready[0] && target_frame_for_buffer[0] != -1)
+    // First priority: buffer that's not ready and has a target
+    if (!buffer_ready[0] && target_frame_for_buffer[0] >= 0)
     {
         buffer_to_process = 0;
     }
-    // Else, try buffer 1 if it needs loading
-    else if (!buffer_ready[1] && target_frame_for_buffer[1] != -1)
+    else if (!buffer_ready[1] && target_frame_for_buffer[1] >= 0)
     {
         buffer_to_process = 1;
     }
 
-    if (buffer_to_process == -1)
+    // Second priority: buffer that's ready but could be preloaded with next frame
+    else if (buffer_ready[0] && target_frame_for_buffer[1] >= 0 &&
+             ((target_frame_for_buffer[0] + 1) % loader_state.total_manifest_frames) == target_frame_for_buffer[1])
     {
-        if (loader_state.file_is_open && loader_state.current_buffer_idx != -1 && !buffer_ready[loader_state.current_buffer_idx])
-        {
-            // Continue processing the currently open file/buffer
-        }
-        else if (loader_state.file_is_open)
-        {
-            if (loader_state.current_buffer_idx != -1 && buffer_ready[loader_state.current_buffer_idx])
-            {
-                f_close(&loader_state.current_file_handle);
-                loader_state.file_is_open = false;
-            }
-            return;
-        }
-        else
-        {
-            return;
-        }
+        buffer_to_process = 1;
     }
-    else
+    else if (buffer_ready[1] && target_frame_for_buffer[0] >= 0 &&
+             ((target_frame_for_buffer[1] + 1) % loader_state.total_manifest_frames) == target_frame_for_buffer[0])
     {
-        if (!open_file_if_needed(buffer_to_process, target_frame_for_buffer[buffer_to_process]))
-        {
-            target_frame_for_buffer[buffer_to_process] = -1;
-            if (buffer_to_process == 0 && !buffer_ready[1] && target_frame_for_buffer[1] != -1)
-            {
-                if (open_file_if_needed(1, target_frame_for_buffer[1]))
-                { /* try to switch to buffer 1 */
-                }
-                else
-                {
-                    target_frame_for_buffer[1] = -1;
-                    return;
-                }
-            }
-            else if (buffer_to_process == 1 && !buffer_ready[0] && target_frame_for_buffer[0] != -1)
-            {
-                if (open_file_if_needed(0, target_frame_for_buffer[0]))
-                { /* try to switch to buffer 0 */
-                }
-                else
-                {
-                    target_frame_for_buffer[0] = -1;
-                    return;
-                }
-            }
-            else
-            {
-                return;
-            }
-        }
+        buffer_to_process = 0;
     }
 
-    if (!loader_state.file_is_open)
+    if (buffer_to_process == -1)
+    {
+        return; // Nothing to do
+    }
+
+    // Track start time for this frame load
+    uint32_t start_time = to_ms_since_boot(get_absolute_time());
+
+    // If we're seeing long load times, be more aggressive about preloading
+    bool should_preload = (avg_load_time > 0 && avg_load_time > 15); // If loads take >15ms, preload aggressively
+
+    // Try to open the file if needed
+    if (!open_file_if_needed(buffer_to_process, target_frame_for_buffer[buffer_to_process]))
     {
         return;
     }
 
-    UINT bytes_read_in_chunk = 0;
-    size_t bytes_to_read_this_chunk = CHUNK_SIZE_BYTES;
-    if (loader_state.current_file_offset + CHUNK_SIZE_BYTES > loader_state.current_file_total_size_bytes)
+continue_current_load:
+    // Calculate how many sectors we need to read
+    UINT bytes_remaining = FRAME_SIZE - loader_state.current_file_offset;
+    UINT sectors_to_read = (bytes_remaining + SECTOR_SIZE - 1) / SECTOR_SIZE;
+
+    // If we're seeing good performance, read more sectors at once
+    if (should_preload && sectors_to_read > 32)
     {
-        bytes_to_read_this_chunk = loader_state.current_file_total_size_bytes - loader_state.current_file_offset;
+        sectors_to_read = 32; // Read larger chunks when performance is good
+    }
+    else if (sectors_to_read > 16)
+    {
+        sectors_to_read = 16; // Default to medium chunks
     }
 
-    if (bytes_to_read_this_chunk > 0)
+    UINT bytes_to_read = sectors_to_read * SECTOR_SIZE;
+    UINT bytes_read = 0;
+
+    // Ensure our read is sector-aligned for best performance
+    if (bytes_to_read > 0)
     {
         uint8_t *buffer_write_ptr = &frame_buffers[loader_state.current_buffer_idx][loader_state.current_file_offset];
-        FRESULT fr = f_read(&loader_state.current_file_handle, buffer_write_ptr, bytes_to_read_this_chunk, &bytes_read_in_chunk);
 
-        if (fr != FR_OK || (bytes_read_in_chunk == 0 && bytes_to_read_this_chunk > 0))
+        // Use f_read directly - the SD card library handles its own DMA internally
+        FRESULT fr = f_read(&loader_state.current_file_handle,
+                            buffer_write_ptr,
+                            bytes_to_read,
+                            &bytes_read);
+
+        if (fr != FR_OK)
         {
             f_close(&loader_state.current_file_handle);
             loader_state.file_is_open = false;
-            target_frame_for_buffer[loader_state.current_buffer_idx] = -1;
-            buffer_ready[loader_state.current_buffer_idx] = false;
             return;
         }
 
-        loader_state.current_file_offset += bytes_read_in_chunk;
+        loader_state.current_file_offset += bytes_read;
 
-        if (loader_state.current_file_offset >= loader_state.current_file_total_size_bytes)
+        // Check if we've completed loading the frame
+        if (loader_state.current_file_offset >= FRAME_SIZE)
         {
             buffer_ready[loader_state.current_buffer_idx] = true;
-            // Keep file open for next frame
-        }
-    }
-    else
-    {
-        if (loader_state.current_file_offset >= loader_state.current_file_total_size_bytes && !buffer_ready[loader_state.current_buffer_idx])
-        {
-            buffer_ready[loader_state.current_buffer_idx] = true;
-            if (loader_state.file_is_open)
+            f_close(&loader_state.current_file_handle);
+            loader_state.file_is_open = false;
+
+            // Update timing statistics
+            uint32_t end_time = to_ms_since_boot(get_absolute_time());
+            uint32_t load_time = end_time - start_time;
+
+            // Update running average
+            if (frame_count < 10)
             {
-                f_close(&loader_state.current_file_handle);
-                loader_state.file_is_open = false;
+                avg_load_time = ((avg_load_time * frame_count) + load_time) / (frame_count + 1);
+                frame_count++;
+            }
+            else
+            {
+                avg_load_time = (avg_load_time * 9 + load_time) / 10; // Moving average
+            }
+
+            last_frame_load_time = load_time;
+
+            // Immediately try to load next frame if we're performing well
+            if (should_preload)
+            {
+                sd_loader_process();
             }
         }
     }

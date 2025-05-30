@@ -7,27 +7,28 @@ static spi_t spi = {
     .sck_gpio = 2,   // GPIO number (not Pico pin number)
     .mosi_gpio = 3,
     .miso_gpio = 4,
-    .baud_rate = 150 * 1000 * 1000 / 3, // Cranked to 50 MHz with 150MHz clk_sys (YOLO!)
-    .spi_mode = 3                       // Explicitly set to SPI Mode 3
-    // Other spi_t fields will be default (0/false) if not specified
+    .baud_rate = 150 * 1000 * 1000 / 4, // 37.5 MHz - more stable than 50MHz
+    .spi_mode = 3,                      // SPI Mode 3 for better stability
+    .set_drive_strength = true,
+    .sck_gpio_drive_strength = GPIO_DRIVE_STRENGTH_12MA,
+    .mosi_gpio_drive_strength = GPIO_DRIVE_STRENGTH_12MA,
+    .use_static_dma_channels = true, // Enable DMA
+    .tx_dma = 2,                     // DMA channel for TX
+    .rx_dma = 3                      // DMA channel for RX
 };
 
 /* SPI Interface */
 static sd_spi_if_t spi_if = {
-    .spi = &spi, // Pointer to the SPI driving this card
-    .ss_gpio = 5 // The SPI slave select GPIO for this SD card
-    // Other sd_spi_if_t fields will be default (0/false)
-};
+    .spi = &spi,  // Pointer to the SPI driving this card
+    .ss_gpio = 5, // The SPI slave select GPIO for this SD card
+    .set_drive_strength = true,
+    .ss_gpio_drive_strength = GPIO_DRIVE_STRENGTH_12MA};
 
 /* Configuration of the SD Card socket object */
 sd_card_t sd_card = {
     .type = SD_IF_SPI,
-    .spi_if_p = &spi_if // Pointer to the SPI interface driving this card
-    // Card detection is not configured here.
-    // To enable it, you would set:
-    // .use_card_detect = true,
-    // .card_detect_gpio = YOUR_CD_GPIO,
-    // .card_detected_true = 1 (or 0, depending on your CD switch)
+    .spi_if_p = &spi_if,     // Pointer to the SPI interface driving this card
+    .use_card_detect = false // No card detect pin in use
 };
 
 /* ********************************************************************** */
