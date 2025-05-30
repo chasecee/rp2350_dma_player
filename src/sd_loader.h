@@ -15,10 +15,10 @@
 #define FRAME_WIDTH 156  // Corrected to match actual BIN file size
 #define FRAME_HEIGHT 156 // Corrected to match actual BIN file size
 
-// Maximum number of frame filenames the manifest reader in main.c can handle.
-// This is used to size the pointer passed to sd_loader_init.
-#define MAX_FRAMES_IN_MANIFEST 100 // Renamed for clarity from previous MAX_FRAMES
-#define MAX_FILENAME_LEN_SD 64     // Renamed for clarity
+// Maximum number of frame filenames the manifest reader can handle.
+// Must match MAX_FRAMES in main.c
+#define MAX_FRAMES_IN_MANIFEST 4000 // Updated to support 3.4k+ frames
+#define MAX_FILENAME_LEN_SD 64      // Maximum length of each frame filename
 
 // Buffer for one full frame (16-bit RGB565 pixels)
 // extern uint16_t frame_buffers[2][FRAME_HEIGHT * FRAME_WIDTH]; // Old 16-bit
@@ -27,38 +27,37 @@ extern uint8_t frame_buffers[2][FRAME_HEIGHT * FRAME_WIDTH]; // Changed to uint8
 
 // Flags indicating if a buffer contains a fully loaded, ready-to-display frame
 extern volatile bool buffer_ready[2];
+// Target frame index for each buffer (-1 if no target)
 extern volatile int target_frame_for_buffer[2];
 
 /**
  * @brief Initializes the SD card loader module.
  *
- * @param frame_filenames_ptr Pointer to the array of frame filenames.
- * @param num_total_frames Total number of frames available as per the manifest.
+ * @param total_frames Total number of frames available
  */
-void sd_loader_init(char frame_filenames[][MAX_FILENAME_LEN_SD], int num_files);
+void sd_loader_init(int total_frames);
 
 /**
  * @brief Processes a chunk of SD card loading.
- * This function should be called repeatedly from the main application loop.
- * It attempts to load data into one of the frame buffers if it's not already full
- * and a loading operation isn't already complete for it.
+ * Call repeatedly from main loop to load frames into available buffers.
+ * Uses double-buffering to load next frame while current frame is displaying.
  */
 void sd_loader_process(void);
 
 /**
- * @brief Gets the frame index that is currently targeted for loading or is loaded in the specified buffer.
+ * @brief Gets the frame index targeted for the specified buffer.
  *
- * @param buffer_idx The buffer index (0 or 1).
- * @return The frame index (from the manifest list) targeted for this buffer. Returns -1 if invalid.
+ * @param buffer_idx The buffer index (0 or 1)
+ * @return Frame index or -1 if invalid/no target
  */
 int sd_loader_get_target_frame_for_buffer(int buffer_idx);
 
 /**
- * @brief Marks a buffer as consumed (displayed) and sets its next target frame.
- * This tells the loader that the buffer is free to be overwritten with new frame data.
+ * @brief Marks a buffer as consumed and sets its next target frame.
+ * Call after displaying a frame to allow buffer reuse.
  *
- * @param buffer_idx The buffer index (0 or 1) that was consumed.
- * @param next_frame_to_target_for_this_buffer The frame index (from manifest) that this buffer should now load.
+ * @param buffer_idx The consumed buffer (0 or 1)
+ * @param next_target_frame Next frame to load into this buffer
  */
 void sd_loader_mark_buffer_consumed(int buffer_idx, int next_target_frame);
 

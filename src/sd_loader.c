@@ -56,38 +56,28 @@ volatile int target_frame_for_buffer[2] = {-1, -1}; // -1 indicates no specific 
 // Internal state for the loader
 static struct
 {
-    char manifest_frame_filenames[MAX_FRAMES_IN_MANIFEST][MAX_FILENAME_LEN_SD];
     int total_manifest_frames;
-    int current_buffer_idx;                                   // Buffer index (0 or 1) currently being loaded into.
-    int current_frame_to_load_idx;                            // Manifest index of the frame currently being loaded or targeted for the current_buffer_idx.
-    FIL current_file_handle;                                  // File handle for the frame being loaded
-    char current_filename_full_path[MAX_FILENAME_LEN_SD + 8]; // "output/" + filename
+    int current_buffer_idx;        // Buffer index (0 or 1) currently being loaded into.
+    int current_frame_to_load_idx; // Manifest index of the frame currently being loaded
+    FIL current_file_handle;       // File handle for the frame being loaded
     uint32_t current_file_total_size_bytes;
     uint32_t current_file_offset; // Current read offset within the file
     bool file_is_open;
-    // bool initial_load_for_buffer0_done; // Not strictly needed with new logic
-    // bool initial_load_for_buffer1_done;
 } loader_state;
 
-void sd_loader_init(char frame_filenames[][MAX_FILENAME_LEN_SD], int num_files)
+void sd_loader_init(int total_frames)
 {
-    printf("SD_LOADER: Initializing with %d files.\\n", num_files);
-    loader_state.total_manifest_frames = num_files;
-    if (num_files == 0)
+    printf("SD_LOADER: Initializing with %d frames.\n", total_frames);
+    loader_state.total_manifest_frames = total_frames;
+    if (total_frames == 0)
     {
-        printf("SD_LOADER: No files to load. Halting loader processing.\\n");
+        printf("SD_LOADER: No frames to load. Halting loader processing.\n");
         return;
-    }
-
-    for (int i = 0; i < num_files && i < MAX_FRAMES_IN_MANIFEST; ++i)
-    {
-        strncpy(loader_state.manifest_frame_filenames[i], frame_filenames[i], MAX_FILENAME_LEN_SD - 1);
-        loader_state.manifest_frame_filenames[i][MAX_FILENAME_LEN_SD - 1] = '\0'; // Ensure null termination
     }
 
     // Initial targets
     target_frame_for_buffer[0] = 0;
-    if (num_files > 1)
+    if (total_frames > 1)
     {
         target_frame_for_buffer[1] = 1;
     }
@@ -97,21 +87,35 @@ void sd_loader_init(char frame_filenames[][MAX_FILENAME_LEN_SD], int num_files)
     }
 
     loader_state.file_is_open = false;
-    loader_state.current_buffer_idx = -1; // No buffer actively being written to by the loader initially
+    loader_state.current_buffer_idx = -1;
     loader_state.current_frame_to_load_idx = -1;
     loader_state.current_file_offset = 0;
     loader_state.current_file_total_size_bytes = 0;
     buffer_ready[0] = false;
     buffer_ready[1] = false;
 
-    printf("SD_LOADER: Init complete. Buffer 0 targeting frame %d. Buffer 1 targeting frame %d.\\n", target_frame_for_buffer[0], target_frame_for_buffer[1]);
+    printf("SD_LOADER: Init complete.\n");
 }
 
 // Attempts to open the file designated by frame_idx_to_load for buffer_idx_to_load.
-// Sets loader_state.current_buffer_idx and loader_state.current_frame_to_load_idx.
 static bool open_file_if_needed(int buffer_idx_to_load, int frame_idx_to_load)
 {
-    printf("OPEN_FILE_IF_NEEDED_ENTRY [%llu]: buf_idx=%d, frame_idx=%d\n", time_us_64(), buffer_idx_to_load, frame_idx_to_load);
+    // Add validation for frame index
+    if (frame_idx_to_load < 0)
+    {
+        printf("ERROR: Invalid frame index %d, resetting to 0\n", frame_idx_to_load);
+        frame_idx_to_load = 0;
+    }
+
+    // Ensure frame index is within bounds
+    frame_idx_to_load = frame_idx_to_load % loader_state.total_manifest_frames;
+
+    // Validate buffer index
+    if (buffer_idx_to_load < 0 || buffer_idx_to_load > 1)
+    {
+        printf("ERROR: Invalid buffer index %d\n", buffer_idx_to_load);
+        return false;
+    }
 
     if (loader_state.file_is_open &&
         loader_state.current_buffer_idx == buffer_idx_to_load &&
@@ -120,26 +124,22 @@ static bool open_file_if_needed(int buffer_idx_to_load, int frame_idx_to_load)
         return true; // Already open for this target
     }
 
+    // Close any previously open file
     if (loader_state.file_is_open)
-    { // File is open, but for a different target or buffer
+    {
         f_close(&loader_state.current_file_handle);
         loader_state.file_is_open = false;
     }
 
-    if (frame_idx_to_load < 0 || frame_idx_to_load >= loader_state.total_manifest_frames)
-    {
-        return false;
-    }
+    // Generate filename on demand
+    char filename[MAX_FILENAME_LEN_SD];
+    snprintf(filename, MAX_FILENAME_LEN_SD, "frame-%05d.bin", frame_idx_to_load);
 
-    // Construct full path: filename directly in root
-    strncpy(loader_state.current_filename_full_path, loader_state.manifest_frame_filenames[frame_idx_to_load],
-            MAX_FILENAME_LEN_SD + 8 - 1);
-    loader_state.current_filename_full_path[MAX_FILENAME_LEN_SD + 8 - 1] = '\0'; // Ensure null termination
-
-    FRESULT fr = f_open(&loader_state.current_file_handle, loader_state.current_filename_full_path, FA_READ);
+    FRESULT fr = f_open(&loader_state.current_file_handle, filename, FA_READ);
 
     if (fr != FR_OK)
     {
+        printf("ERROR: Failed to open file '%s' (FR: %d)\n", filename, fr);
         loader_state.file_is_open = false;
         return false;
     }
@@ -152,19 +152,18 @@ static bool open_file_if_needed(int buffer_idx_to_load, int frame_idx_to_load)
 
     if (loader_state.current_file_total_size_bytes != SD_BUFFER_SIZE)
     {
+        printf("ERROR: File size mismatch. Expected %d, got %lu\n",
+               SD_BUFFER_SIZE, loader_state.current_file_total_size_bytes);
         f_close(&loader_state.current_file_handle);
         loader_state.file_is_open = false;
         return false;
     }
+
     return true;
 }
 
 void sd_loader_process(void)
 {
-    printf("SD_LOADER_PROCESS START [%llu]: file_open=%d, cur_buf=%d, cur_load_idx=%d, offset=%lu. B0_ready:%d,T0:%d. B1_ready:%d,T1:%d\n",
-           time_us_64(), loader_state.file_is_open, loader_state.current_buffer_idx, loader_state.current_frame_to_load_idx, loader_state.current_file_offset,
-           buffer_ready[0], target_frame_for_buffer[0], buffer_ready[1], target_frame_for_buffer[1]);
-
     if (loader_state.total_manifest_frames == 0)
         return;
 
@@ -288,22 +287,29 @@ void sd_loader_mark_buffer_consumed(int buffer_idx, int next_target_frame)
     if (buffer_idx < 0 || buffer_idx > 1)
         return;
 
-    // printf("SD_LOADER: Buffer %d consumed. New target frame: %d.\n", buffer_idx, next_target_frame);
     buffer_ready[buffer_idx] = false;
-    int new_target = next_target_frame % loader_state.total_manifest_frames;
+
+    // Ensure we properly loop back to the start
+    int new_target;
+    if (next_target_frame >= loader_state.total_manifest_frames)
+    {
+        new_target = next_target_frame % loader_state.total_manifest_frames;
+        printf("LOOPING: Frame %d -> %d\n", next_target_frame, new_target);
+    }
+    else
+    {
+        new_target = next_target_frame;
+    }
+
     target_frame_for_buffer[buffer_idx] = new_target;
 
-    // If the file currently open was for the buffer we just consumed, it should be closed.
-    // The next call to sd_loader_process will then open the new target file for this buffer (or another one).
+    // If the file currently open was for the buffer we just consumed, close it
     if (loader_state.file_is_open && loader_state.current_buffer_idx == buffer_idx)
     {
-        // It's unlikely the file would still be open if the buffer was ready and consumed,
-        // as sd_loader_process should have closed it upon full load.
-        // But as a safeguard:
-        // printf("SD_LOADER: Closing file for just-consumed buffer %d (was targeting frame %d).\n", buffer_idx, loader_state.current_frame_to_load_idx);
-        // f_close(&loader_state.current_file_handle);
-        // loader_state.file_is_open = false;
-        // loader_state.current_buffer_idx = -1; // No buffer actively being loaded by this file op anymore.
+        f_close(&loader_state.current_file_handle);
+        loader_state.file_is_open = false;
+        loader_state.current_buffer_idx = -1;
+        loader_state.current_frame_to_load_idx = -1;
     }
 }
 

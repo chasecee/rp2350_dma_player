@@ -13,10 +13,12 @@
 // Display dimensions
 #define PHYSICAL_DISPLAY_WIDTH 466
 #define PHYSICAL_DISPLAY_HEIGHT 466
-#define DISPLAY_WIDTH FRAME_WIDTH   // Render target width is frame width for 1:1
-#define DISPLAY_HEIGHT FRAME_HEIGHT // Render target height is frame height for 1:1
-#define FRAME_WIDTH 156             // Matched to actual BIN file size
-#define FRAME_HEIGHT 156            // Matched to actual BIN file size
+#define FRAME_WIDTH 156
+#define FRAME_HEIGHT 156
+#define SCALED_WIDTH (FRAME_WIDTH * 2)   // 312
+#define SCALED_HEIGHT (FRAME_HEIGHT * 2) // 312
+#define DISPLAY_WIDTH SCALED_WIDTH       // Use scaled dimensions
+#define DISPLAY_HEIGHT SCALED_HEIGHT     // Use scaled dimensions
 
 // RGB332 Color definitions
 #define RED_COLOR_RGB332 0xE0   // 11100000
@@ -47,16 +49,17 @@ void dma_done_callback(void)
 // Function to initialize precomputed scaling maps
 void init_scaling_maps(void)
 {
-    printf("Initializing scaling maps (1:1 direct mapping)...\n");
-    for (int i = 0; i < DISPLAY_HEIGHT; i++) // DISPLAY_HEIGHT is now FRAME_HEIGHT
+    printf("Initializing 2x scaling maps...\n");
+    // Not needed for integer scaling, but keep for future flexibility
+    for (int i = 0; i < DISPLAY_HEIGHT; i++)
     {
-        source_y_map[i] = (i * FRAME_HEIGHT) / DISPLAY_HEIGHT; // Will resolve to i
+        source_y_map[i] = i >> 1; // Divide by 2
     }
-    for (int i = 0; i < DISPLAY_WIDTH; i++) // DISPLAY_WIDTH is now FRAME_WIDTH
+    for (int i = 0; i < DISPLAY_WIDTH; i++)
     {
-        source_x_map[i] = (i * FRAME_WIDTH) / DISPLAY_WIDTH; // Will resolve to i
+        source_x_map[i] = i >> 1; // Divide by 2
     }
-    printf("Scaling maps initialized for 1:1 mapping.\n");
+    printf("2x scaling maps initialized.\n");
 }
 
 // Function to clear the entire physical screen to black
@@ -176,65 +179,70 @@ int main()
         }
     }
 
-    // Debug: List root directory contents
-    DIR dir;
-    FILINFO fno;
-    fr = f_opendir(&dir, "");
-    if (fr == FR_OK)
-    {
-        printf("Root directory contents:\n");
-        while (1)
-        {
-            fr = f_readdir(&dir, &fno);
-            if (fr != FR_OK || fno.fname[0] == 0)
-                break;
-            printf("  %s%s\n", fno.fname, (fno.fattrib & AM_DIR) ? "/" : "");
-        }
-        f_closedir(&dir);
-    }
+    printf("MAIN: Checking for animation frames...\n");
 
-    printf("MAIN: Loading animation from manifest.txt...\n");
-
-    char frame_filenames[MAX_FRAMES][MAX_FILENAME_LEN];
     int num_frames = 0;
-    FIL manifest_fil;
-    const char *manifest_filename = "manifest.txt";
+    FIL test_fil;
+    char test_filename[MAX_FILENAME_LEN];
 
-    fr = f_open(&manifest_fil, manifest_filename, FA_READ);
+    // Try to open first frame to verify pattern start
+    snprintf(test_filename, MAX_FILENAME_LEN, "frame-%05d.bin", 0);
+    fr = f_open(&test_fil, test_filename, FA_READ);
     if (fr != FR_OK)
     {
-        printf("ERROR: Failed to open manifest %s. FR_CODE: %d\n", manifest_filename, fr);
+        printf("ERROR: Failed to open first frame %s. FR_CODE: %d\n", test_filename, fr);
+        while (true)
+        {
+            tight_loop_contents();
+        }
+    }
+    f_close(&test_fil);
+
+    // Try to open what we think is the last frame (based on manifest)
+    snprintf(test_filename, MAX_FILENAME_LEN, "frame-%05d.bin", 3402);
+    fr = f_open(&test_fil, test_filename, FA_READ);
+    if (fr != FR_OK)
+    {
+        printf("Scanning for last frame...\n");
+
+        // Scan backwards from 3402 to find the last valid frame
+        for (int i = 3401; i >= 0; i--)
+        {
+            snprintf(test_filename, MAX_FILENAME_LEN, "frame-%05d.bin", i);
+            fr = f_open(&test_fil, test_filename, FA_READ);
+            if (fr == FR_OK)
+            {
+                f_close(&test_fil);
+                num_frames = i + 1;
+                break;
+            }
+        }
     }
     else
     {
-        printf("Successfully opened %s.\n", manifest_filename);
-        while (f_gets(frame_filenames[num_frames], MAX_FILENAME_LEN, &manifest_fil) && num_frames < MAX_FRAMES)
-        {
-            frame_filenames[num_frames][strcspn(frame_filenames[num_frames], "\r\n")] = 0;
-            if (strlen(frame_filenames[num_frames]) > 0)
-            {
-                // printf("Found frame: %s\n", frame_filenames[num_frames]); // Verbose
-                num_frames++;
-            }
-        }
-        f_close(&manifest_fil);
-        printf("Read %d frame(s) from manifest.\n", num_frames);
+        f_close(&test_fil);
+        num_frames = 3403; // We found frame-03402.bin, so we have 3403 frames (0-3402)
     }
+
+    printf("Found %d sequential frames.\n", num_frames);
+
+    // Initialize the SD Loader module
+    sd_loader_init(num_frames);
 
     if (num_frames == 0)
     {
-        printf("No frames from manifest. Displaying error colors.\n");
-        uint8_t error_colors[] = {RED_COLOR_RGB332, BLUE_COLOR_RGB332, GREEN_COLOR_RGB332}; // Changed to uint8_t and RGB332
+        printf("No frames found. Displaying error pattern.\n");
+        uint8_t error_colors[] = {RED_COLOR_RGB332, BLUE_COLOR_RGB332, GREEN_COLOR_RGB332};
         int error_color_index = 0;
         while (1)
         {
             bsp_co5300_set_window(0, 0, PHYSICAL_DISPLAY_WIDTH - 1, PHYSICAL_DISPLAY_HEIGHT - 1);
-            uint8_t error_line_buffer[PHYSICAL_DISPLAY_WIDTH]; // Changed to uint8_t
+            uint8_t error_line_buffer[PHYSICAL_DISPLAY_WIDTH];
             for (int i = 0; i < PHYSICAL_DISPLAY_WIDTH; i++)
             {
                 error_line_buffer[i] = error_colors[error_color_index];
             }
-            bsp_co5300_prepare_for_frame_pixels(); // Prepare once before loop
+            bsp_co5300_prepare_for_frame_pixels();
             for (int y = 0; y < PHYSICAL_DISPLAY_HEIGHT; y++)
             {
                 while (!dma_transfer_complete)
@@ -247,15 +255,12 @@ int main()
             while (!dma_transfer_complete)
             {
                 sleep_us(0);
-            } // Wait for last flush
+            }
             bsp_co5300_finish_frame_pixels();
             error_color_index = (error_color_index + 1) % 3;
-            sleep_ms(500); // Slow down error flashing
+            sleep_ms(500);
         }
     }
-
-    // Initialize the SD Loader module
-    sd_loader_init(frame_filenames, num_frames);
 
 // Buffer to hold two entire source frames in RAM for double buffering - MOVED TO SD_LOADER
 // static uint16_t frame_buffers[2][FRAME_HEIGHT * FRAME_WIDTH]; // THIS LINE SHOULD REMAIN COMMENTED OR BE DELETED
@@ -288,99 +293,113 @@ int main()
     int display_frame_idx = 0;  // The frame index we intend to display next
     int display_buffer_idx = 0; // The buffer (0 or 1) we expect to find display_frame_idx in
 
-    // Calculate offsets for centering 156x156 content on 466x466 display
-    const int x_offset_centered = (PHYSICAL_DISPLAY_WIDTH - DISPLAY_WIDTH) / 2;   // DISPLAY_WIDTH is 156
-    const int y_offset_centered = (PHYSICAL_DISPLAY_HEIGHT - DISPLAY_HEIGHT) / 2; // DISPLAY_HEIGHT is 156
+    // Calculate offsets for centering 312x312 content on 466x466 display
+    const int x_offset_centered = (PHYSICAL_DISPLAY_WIDTH - SCALED_WIDTH) / 2;
+    const int y_offset_centered = (PHYSICAL_DISPLAY_HEIGHT - SCALED_HEIGHT) / 2;
 
-    printf("Entering main display & loader loop\n");
+    printf("Entering main display & loader loop (2x scaling)\n");
 
     absolute_time_t loop_start_time, loop_end_time;
     absolute_time_t sd_load_start_time, sd_load_end_time;
     absolute_time_t display_prep_start_time, display_prep_end_time;
     absolute_time_t display_render_start_time, display_render_end_time;
 
+    // Allocate line buffers for 2x scaling
+    uint8_t scaled_line_buffer[SCALED_WIDTH];
+
     while (1)
     {
         loop_start_time = get_absolute_time();
 
-        // Process SD card loading - this will load chunks into buffers if needed
+        // Process SD card loading
         sd_load_start_time = get_absolute_time();
         sd_loader_process();
         sd_load_end_time = get_absolute_time();
 
-        // Check if the buffer we expect to display from is ready and contains the correct frame
-        // printf("MAIN_PRE_DISPLAY_CHECK [%llu]: disp_frm_idx=%d, disp_buf_idx=%d. B0_ready:%d,T0:%d. B1_ready:%d,T1:%d\n",
-        //        time_us_64(), display_frame_idx, display_buffer_idx,
-        //        buffer_ready[0], sd_loader_get_target_frame_for_buffer(0), buffer_ready[1], sd_loader_get_target_frame_for_buffer(1));
-
         if (buffer_ready[display_buffer_idx] &&
             sd_loader_get_target_frame_for_buffer(display_buffer_idx) == display_frame_idx)
         {
-            // printf("Displaying frame %d from buffer_idx %d\n", display_frame_idx, display_buffer_idx);
-            bsp_co5300_set_window(x_offset_centered, y_offset_centered, x_offset_centered + DISPLAY_WIDTH - 1, y_offset_centered + DISPLAY_HEIGHT - 1);
-            bsp_co5300_prepare_for_frame_pixels();
-
             display_render_start_time = get_absolute_time();
 
-            // Just copy the entire frame at once - no need for chunking anymore
-            while (!dma_transfer_complete)
-            {
-                tight_loop_contents();
-            }
-            dma_transfer_complete = false;
-            bsp_co5300_flush((uint8_t *)frame_buffers[display_buffer_idx], FRAME_WIDTH * FRAME_HEIGHT);
+            // Set up display window for scaled content
+            bsp_co5300_set_window(x_offset_centered, y_offset_centered,
+                                  x_offset_centered + SCALED_WIDTH - 1,
+                                  y_offset_centered + SCALED_HEIGHT - 1);
+            bsp_co5300_prepare_for_frame_pixels();
 
-            // Wait for the DMA transfer to complete
-            while (!dma_transfer_complete)
+            // Render frame with 2x scaling
+            uint8_t *src_buffer = (uint8_t *)frame_buffers[display_buffer_idx];
+
+            for (int y = 0; y < FRAME_HEIGHT; y++)
             {
-                tight_loop_contents();
+                // Scale each source line to 2x width
+                for (int x = 0; x < FRAME_WIDTH; x++)
+                {
+                    uint8_t pixel = src_buffer[y * FRAME_WIDTH + x];
+                    // Each source pixel becomes 2x2 pixels
+                    scaled_line_buffer[x * 2] = pixel;
+                    scaled_line_buffer[x * 2 + 1] = pixel;
+                }
+
+                // Output the scaled line twice for 2x vertical scaling
+                while (!dma_transfer_complete)
+                    tight_loop_contents();
+                dma_transfer_complete = false;
+                bsp_co5300_flush(scaled_line_buffer, SCALED_WIDTH);
+
+                while (!dma_transfer_complete)
+                    tight_loop_contents();
+                dma_transfer_complete = false;
+                bsp_co5300_flush(scaled_line_buffer, SCALED_WIDTH);
             }
+
+            // Wait for the last DMA transfer
+            while (!dma_transfer_complete)
+                tight_loop_contents();
             bsp_co5300_finish_frame_pixels();
+
             display_render_end_time = get_absolute_time();
 
-            // Frame display complete. Mark buffer as consumed and set its next target.
-            int next_frame_to_target_for_this_buffer = (display_frame_idx + 2) % num_frames;
-            if (num_frames == 1)
-                next_frame_to_target_for_this_buffer = 0; // Special case for single frame
+            // Frame display complete, advance to next
+            int next_frame_to_target = display_frame_idx + 2;
 
-            // printf("Main: Displayed frame %d from buffer %d. Next target for this buffer: frame %d\n",
-            //        display_frame_idx, display_buffer_idx, next_frame_to_target_for_this_buffer);
-            sd_loader_mark_buffer_consumed(display_buffer_idx, next_frame_to_target_for_this_buffer);
+            // Handle frame wrapping
+            if (next_frame_to_target >= num_frames)
+            {
+                printf("Main loop wrapping from frame %d back to %d (total frames: %d)\n",
+                       next_frame_to_target, next_frame_to_target % num_frames, num_frames);
+            }
 
-            // Advance to next frame and buffer for display
+            // Mark current buffer as consumed and set its next target
+            sd_loader_mark_buffer_consumed(display_buffer_idx, next_frame_to_target);
+
+            // Advance to next frame, ensuring we wrap around properly
             display_frame_idx = (display_frame_idx + 1) % num_frames;
-            display_buffer_idx = 1 - display_buffer_idx; // Flip to other buffer
 
-            // Playthrough logic
+            // Switch to other buffer
+            display_buffer_idx = 1 - display_buffer_idx;
+
+            // Print profiling info at the end of each loop
             if (display_frame_idx == 0) // This signifies a completed playthrough
             {
                 loop_end_time = get_absolute_time();
-                printf("Profiling: SD Load: %lld us, Display Render: %lld us, Full Loop: %lld us\n",
+                printf("LOOP_COMPLETE: SD Load: %lld us, Display Render: %lld us, Full Loop: %lld us\n",
                        absolute_time_diff_us(sd_load_start_time, sd_load_end_time),
                        absolute_time_diff_us(display_render_start_time, display_render_end_time),
                        absolute_time_diff_us(loop_start_time, loop_end_time));
-
-                printf("Cycle complete. Pausing...\n");
-                // sleep_ms(0);  // REMOVED - unnecessary pause between cycles
             }
         }
         else
         {
-            // Expected buffer not ready or contains wrong frame, or still loading.
-            // sd_loader_process() will continue trying to load.
-            // We can add a small delay here if the display loop is too tight
-            // and not giving enough time for sd_loader_process to work effectively,
-            // though sd_loader_process itself uses blocking f_read for chunks.
-            tight_loop_contents(); // Use tight loop instead of sleep for faster response
-            // sleep_us(10); // REMOVED - too long of a delay
-            // If not displaying, still print SD load time and a marker for loop time if needed
+            // Expected buffer not ready or contains wrong frame
+            tight_loop_contents();
+
+            // Print debug info
             loop_end_time = get_absolute_time();
-            if (!(buffer_ready[display_buffer_idx] && sd_loader_get_target_frame_for_buffer(display_buffer_idx) == display_frame_idx))
-            {
-                printf("Profiling (No Display): SD Load: %lld us, Loop: %lld us\n",
-                       absolute_time_diff_us(sd_load_start_time, sd_load_end_time),
-                       absolute_time_diff_us(loop_start_time, loop_end_time));
-            }
+            printf("WAITING: buf_idx=%d, frame_idx=%d, B0_ready=%d,T0=%d, B1_ready=%d,T1=%d\n",
+                   display_buffer_idx, display_frame_idx,
+                   buffer_ready[0], sd_loader_get_target_frame_for_buffer(0),
+                   buffer_ready[1], sd_loader_get_target_frame_for_buffer(1));
         }
     } // end while(1)
 
