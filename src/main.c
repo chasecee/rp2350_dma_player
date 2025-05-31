@@ -16,8 +16,17 @@
 #define PHYSICAL_DISPLAY_HEIGHT 466
 #define FRAME_WIDTH 156
 #define FRAME_HEIGHT 156
+
+// Set to 1 for native 156x156 output, 0 for 466x466 scaled output
+#define NATIVE_OUTPUT 1
+
+#if NATIVE_OUTPUT
+#define DISPLAY_WIDTH 156
+#define DISPLAY_HEIGHT 156
+#else
 #define DISPLAY_WIDTH PHYSICAL_DISPLAY_WIDTH
 #define DISPLAY_HEIGHT PHYSICAL_DISPLAY_HEIGHT
+#endif
 
 // Scaling factors (fixed point with 8 bits of fraction)
 #define SCALE_FACTOR_X ((DISPLAY_WIDTH << 8) / FRAME_WIDTH)
@@ -168,7 +177,7 @@ int main()
     DBG_PRINTF("MAIN: Display initialized.\n");
 
     // Clear the entire screen to black first
-    // clear_entire_screen_to_black();  // COMMENTED OUT - unnecessary overhead for centered playback
+    clear_entire_screen_to_black();
 
     // Initialize SD DMA (must be done after display potentially claims DMA_IRQ_0)
     DBG_PRINTF("MAIN: Initializing general purpose DMA (formerly SD DMA)...\n");
@@ -312,34 +321,56 @@ int main()
         if (buffer_ready[0] && sd_loader_get_target_frame_for_buffer(0) == display_frame_idx)
         {
             // Set up display window for full content
-            bsp_co5300_set_window(x_offset, y_offset,
-                                  x_offset + DISPLAY_WIDTH - 1,
-                                  y_offset + DISPLAY_HEIGHT - 1);
-            bsp_co5300_prepare_for_frame_pixels();
-
-            // Get pointer to source frame (always buffer 0)
-            uint16_t *src_buffer = frame_buffers[0];
-
-            // 3x integer scaling: for each display line, fill from the corresponding input line
-            for (int y_disp = 0; y_disp < DISPLAY_HEIGHT; y_disp++)
+            if (NATIVE_OUTPUT)
             {
-                int src_y = y_disp / 3;
-                uint16_t *src_line = &src_buffer[src_y * FRAME_WIDTH];
-                for (int x_disp = 0; x_disp < DISPLAY_WIDTH; x_disp++)
+                int x_offset = (PHYSICAL_DISPLAY_WIDTH - DISPLAY_WIDTH) / 2;
+                int y_offset = (PHYSICAL_DISPLAY_HEIGHT - DISPLAY_HEIGHT) / 2;
+                bsp_co5300_set_window(x_offset, y_offset,
+                                      x_offset + DISPLAY_WIDTH - 1,
+                                      y_offset + DISPLAY_HEIGHT - 1);
+                bsp_co5300_prepare_for_frame_pixels();
+                // No scaling, just copy the line directly
+                for (int y_disp = 0; y_disp < DISPLAY_HEIGHT; y_disp++)
                 {
-                    int src_x = x_disp / 3;
-                    scaled_line_buffer[x_disp] = src_line[src_x];
+                    uint16_t *src_line = &frame_buffers[0][y_disp * FRAME_WIDTH];
+                    for (int x_disp = 0; x_disp < DISPLAY_WIDTH; x_disp++)
+                    {
+                        scaled_line_buffer[x_disp] = src_line[x_disp];
+                    }
+                    // Byte swap as before
+                    for (int i = 0; i < DISPLAY_WIDTH; i++)
+                    {
+                        uint16_t px = scaled_line_buffer[i];
+                        scaled_line_buffer[i] = (px >> 8) | (px << 8);
+                    }
+                    while (!dma_transfer_complete)
+                        tight_loop_contents();
+                    dma_transfer_complete = false;
+                    bsp_co5300_flush((uint8_t *)scaled_line_buffer, DISPLAY_WIDTH * sizeof(uint16_t));
                 }
-                // Swap bytes for each pixel to match display's big-endian RGB565
-                for (int i = 0; i < DISPLAY_WIDTH; i++)
+            }
+            else
+            {
+                // 3x integer scaling: for each display line, fill from the corresponding input line
+                for (int y_disp = 0; y_disp < DISPLAY_HEIGHT; y_disp++)
                 {
-                    uint16_t px = scaled_line_buffer[i];
-                    scaled_line_buffer[i] = (px >> 8) | (px << 8);
+                    int src_y = y_disp / 3;
+                    uint16_t *src_line = &frame_buffers[0][src_y * FRAME_WIDTH];
+                    for (int x_disp = 0; x_disp < DISPLAY_WIDTH; x_disp++)
+                    {
+                        int src_x = x_disp / 3;
+                        scaled_line_buffer[x_disp] = src_line[src_x];
+                    }
+                    for (int i = 0; i < DISPLAY_WIDTH; i++)
+                    {
+                        uint16_t px = scaled_line_buffer[i];
+                        scaled_line_buffer[i] = (px >> 8) | (px << 8);
+                    }
+                    while (!dma_transfer_complete)
+                        tight_loop_contents();
+                    dma_transfer_complete = false;
+                    bsp_co5300_flush((uint8_t *)scaled_line_buffer, DISPLAY_WIDTH * sizeof(uint16_t));
                 }
-                while (!dma_transfer_complete)
-                    tight_loop_contents();
-                dma_transfer_complete = false;
-                bsp_co5300_flush((uint8_t *)scaled_line_buffer, DISPLAY_WIDTH * sizeof(uint16_t)); // Send bytes for one 16-bit line
             }
 
             // Wait for the last DMA transfer (for the full frame)
