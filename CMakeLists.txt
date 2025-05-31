@@ -32,8 +32,7 @@ add_subdirectory(libraries/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/src)
 
 add_executable(rp2350_dma_player
     src/main.c
-    src/dma_config.c
-    src/sd_loader.c
+    src/raw_sd_loader.c
     hw_config.c
     libraries/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/src/sd_driver/SPI/sd_spi.c
     libraries/bsp/bsp_cd5300.c

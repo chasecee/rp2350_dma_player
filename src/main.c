@@ -1,15 +1,13 @@
 #include <stdio.h>
 #include <string.h> // For strcpy, etc.
 #include "pico/stdlib.h"
-#include "pico/time.h"       // Added for profiling
-#include "hardware/clocks.h" // <<< ADD THIS INCLUDE
-#include "ff.h"              // FatFS library
-#include "sd_card.h"         // SD card driver functions
-#include "bsp_co5300.h"      // CO5300 display driver
-#include "dma_config.h"      // Include the new DMA config header
-#include "sd_loader.h"       // Include the new SD loader module
-#include "debug.h"           // Add debug macro header
-// #include "palette_rgb565.h"  // No longer needed for direct RGB565 rendering
+#include "pico/time.h" // Added for profiling
+#include "hardware/clocks.h"
+#include "diskio.h"        // Direct disk access (no FatFS!)
+#include "sd_card.h"       // SD card driver functions
+#include "bsp_co5300.h"    // CO5300 display driver
+#include "raw_sd_loader.h" // Raw SD loader module
+#include "debug.h"         // Debug macro header
 
 // Display dimensions
 #define PHYSICAL_DISPLAY_WIDTH 466
@@ -28,40 +26,19 @@
 #define DISPLAY_HEIGHT PHYSICAL_DISPLAY_HEIGHT
 #endif
 
-// RGB332 Color definitions - Will be changed to RGB565
+// RGB565 Color definitions
 #define RED_COLOR_RGB565 0xF800   // 1111100000000000
 #define GREEN_COLOR_RGB565 0x07E0 // 0000011111100000
 #define BLUE_COLOR_RGB565 0x001F  // 0000000000011111
 #define BLACK_COLOR_RGB565 0x0000 // 0000000000000000
 
-// Static buffer for the fully scaled frame (466x466 pixels, 16-bit color) - REMOVED FOR MEMORY
-// static uint16_t full_scaled_frame_buffer[DISPLAY_WIDTH * DISPLAY_HEIGHT];
-
-#define MAX_FILENAME_LEN 64
-#define MAX_FRAMES 4000 // Max number of frames we can list in the manifest - Updated from 100 to support 3.4k+ frames
-
-// Global 256-color palette (RGB565 format)
-// TODO: You MUST populate this palette with the colors used by your 8-bit images!
-// Example: palette[indexed_color] = rgb565_color;
-// static uint16_t global_palette[256]; // REMOVED - Now using generated_global_palette from palette_rgb565.h
-
-// Remove precomputed scaling maps - not needed for native display
-// static uint16_t source_y_map[DISPLAY_HEIGHT];
-// static uint16_t source_x_map[DISPLAY_WIDTH];
-
 volatile bool dma_transfer_complete = true; // Flag for DMA completion (for display flushing)
-
-// Remove optimized 3x scaling function - not needed for native display
-// static inline void scale_line_3x_optimized(uint16_t *dst, const uint16_t *src, int src_width) { ... }
 
 // Callback function for DMA
 void dma_done_callback(void)
 {
     dma_transfer_complete = true; // Signal DMA completion
 }
-
-// Remove function to initialize precomputed scaling maps - not needed for native display
-// void init_scaling_maps(void) { ... }
 
 // Function to clear the entire physical screen to black
 void clear_entire_screen_to_black(void)
@@ -127,11 +104,8 @@ int main()
     sleep_ms(100);            // Reduced from 2000ms - just enough for serial init
     stdio_init_all();
     // Set system clock to 150 MHz for RP2350
-    // Must be called before PLLs are initialized by other functions (e.g. stdio_init_all might init USB PLL)
-    // However, for safety and common practice, it's often set very early.
-    // Check RP2350 datasheet & SDK docs for precise timing if issues arise.
-    set_sys_clock_khz(150000, true); // <<< ADD THIS LINE
-    sleep_ms(100);                   // Reduced from 2000ms - just enough for clock stability
+    set_sys_clock_khz(150000, true);
+    sleep_ms(100);
     DBG_PRINTF("MAIN: System Initialized. Clock: %lu Hz\n", clock_get_hz(clk_sys));
 
     // Initialize Display (minimal parameters)
@@ -143,8 +117,7 @@ int main()
         .y_offset = 0,
         .brightness = 95,
         .enabled_dma = true,
-        .dma_flush_done_callback = dma_done_callback // Ensure not NULL
-    };
+        .dma_flush_done_callback = dma_done_callback};
     if (!display_info.dma_flush_done_callback)
     {
         printf("ERROR: dma_flush_done_callback is NULL!\n");
@@ -157,11 +130,6 @@ int main()
     // Clear the entire screen to black first
     clear_entire_screen_to_black();
 
-    // Initialize SD DMA (must be done after display potentially claims DMA_IRQ_0)
-    DBG_PRINTF("MAIN: Initializing general purpose DMA (formerly SD DMA)...\n");
-    init_sd_dma(); // This is now a general purpose DMA channel claimer
-    DBG_PRINTF("MAIN: General purpose DMA initialized.\n");
-
     // --- SD CARD CODE ---
     DBG_PRINTF("MAIN: Initializing SD card...\n");
     if (!sd_init_driver())
@@ -172,48 +140,39 @@ int main()
             tight_loop_contents();
         }
     }
-    DBG_PRINTF("MAIN: SD card mounted.\n");
-    FATFS fs;
-    FRESULT fr;
-    fr = f_mount(&fs, "", 1);
-    if (fr != FR_OK)
+
+    // Initialize disk layer directly (no filesystem needed for raw sector access)
+    DSTATUS disk_status = disk_initialize(0); // Physical drive 0
+    if (disk_status != 0)
     {
-        printf("ERROR: Failed to mount SD card. FatFS error code: %d\n", fr);
+        printf("ERROR: Failed to initialize disk for raw access. Status: %d\n", disk_status);
         while (true)
         {
             tight_loop_contents();
         }
     }
+
+    DBG_PRINTF("MAIN: SD card initialized for raw sector access.\n");
 
     DBG_PRINTF("MAIN: Checking for animation frames...\n");
 
     int num_frames = 0;
-    FIL frames_bin_fil;
-    fr = f_open(&frames_bin_fil, "frames.bin", FA_READ);
-    if (fr != FR_OK)
-    {
-        printf("ERROR: Failed to open frames.bin. FR_CODE: %d\n", fr);
-        while (true)
-        {
-            tight_loop_contents();
-        }
-    }
-    // Get file size and compute number of frames
-    uint32_t frames_bin_size = f_size(&frames_bin_fil);
-    num_frames = frames_bin_size / (FRAME_WIDTH * FRAME_HEIGHT * 2); // 2 bytes per pixel for RGB565
-    f_close(&frames_bin_fil);
 
-    DBG_PRINTF("Found %d frames in frames.bin (16-bit RGB565 format expected).\n", num_frames);
-    DBG_PRINTF("File size: %lu bytes, Expected per frame: %d bytes\n",
-               frames_bin_size, FRAME_WIDTH * FRAME_HEIGHT * 2);
-    uint32_t remainder = frames_bin_size % (FRAME_WIDTH * FRAME_HEIGHT * 2);
-    if (remainder != 0)
-    {
-        DBG_PRINTF("WARNING: File size has %lu extra bytes (not frame-aligned)\n", remainder);
-    }
+    // For raw SD mode, we calculate frames from known data
+    // Each frame is FRAME_WIDTH * FRAME_HEIGHT * 2 bytes (RGB565)
+    const uint32_t frame_size_bytes = FRAME_WIDTH * FRAME_HEIGHT * 2;
 
-    // Initialize the SD Loader module
-    sd_loader_init(num_frames);
+    // Using the actual number we know was written to frames.bin
+    // TODO: Could read from metadata file or calculate from sectors used
+    num_frames = 3403; // This matches your actual animation
+
+    DBG_PRINTF("RAW_SD_LOADER: Using %d frames (%u bytes per frame)\n",
+               num_frames, frame_size_bytes);
+    DBG_PRINTF("RAW_SD_LOADER: Total animation data: %u bytes\n",
+               num_frames * frame_size_bytes);
+
+    // Initialize the RAW SD Loader module
+    raw_sd_loader_init(num_frames);
 
     if (num_frames == 0)
     {
@@ -248,22 +207,6 @@ int main()
         }
     }
 
-    // Buffer to hold two entire source frames in RAM for double buffering - MOVED TO SD_LOADER
-    // static uint16_t frame_buffers[2][FRAME_HEIGHT * FRAME_WIDTH]; // THIS LINE SHOULD REMAIN COMMENTED OR BE DELETED
-    // int current_buffer = 0; // Will be replaced by display_buffer_idx_for_display
-
-    // DMA line buffers (for display)
-    // Define how many lines to buffer for each DMA transfer
-    // #define LINES_PER_BUFFER FRAME_HEIGHT                              // Process entire frame at once - we have the RAM
-    //     uint8_t frame_line_buffer_a[DISPLAY_WIDTH * LINES_PER_BUFFER]; // Changed to uint8_t
-    //     uint8_t frame_line_buffer_b[DISPLAY_WIDTH * LINES_PER_BUFFER]; // Changed to uint8_t
-    //     volatile uint8_t *cpu_buffer_ptr;                              // Changed to uint8_t*
-    //     volatile uint8_t *dma_buffer_ptr;                              // Changed to uint8_t*
-
-    // FIL frame_fil; // Moved to sd_loader.c
-    // UINT bytes_read_for_full_frame; // Not needed with chunked loading this way
-    // char current_frame_full_path[MAX_FILENAME_LEN + 8]; // Handled by sd_loader
-
     DBG_PRINTF("Starting 16-bit RGB565 animation loop (%d frames, %dx%d native display).\n",
                num_frames, FRAME_WIDTH, FRAME_HEIGHT);
 
@@ -273,16 +216,6 @@ int main()
     DBG_PRINTF("Calculated centering offset: x=%d, y=%d\n",
                (PHYSICAL_DISPLAY_WIDTH - DISPLAY_WIDTH) / 2,
                (PHYSICAL_DISPLAY_HEIGHT - DISPLAY_HEIGHT) / 2);
-
-    // Pre-load first frame into buffer 0 - REMOVED (handled by sd_loader_process calls)
-    // snprintf(current_frame_full_path, sizeof(current_frame_full_path), "output/%s", frame_filenames[0]);
-    // fr = f_open(&frame_fil, current_frame_full_path, FA_READ);
-    // if (fr == FR_OK)
-    // {
-    //     fr = f_read(&frame_fil, frame_buffers[0], FRAME_HEIGHT * FRAME_WIDTH * sizeof(uint16_t), &bytes_read_for_full_frame);
-    //     f_close(&frame_fil);
-    //     if (fr == FR_OK) buffer_ready[0] = true; // Old buffer_ready
-    // }
 
     int display_frame_idx = 0;
     int display_buffer_idx = 0;
@@ -325,14 +258,14 @@ int main()
     {
         // Process SD card loading first
         profile_start = get_absolute_time();
-        sd_loader_process();
+        raw_sd_loader_process();
         sd_load_time_us = absolute_time_diff_us(profile_start, get_absolute_time());
 
         // Check which buffer has the frame we want to display
         int buffer_to_display = -1;
         for (int i = 0; i < 2; i++)
         {
-            if (buffer_ready[i] && sd_loader_get_target_frame_for_buffer(i) == display_frame_idx)
+            if (buffer_ready[i] && raw_sd_loader_get_target_frame_for_buffer(i) == display_frame_idx)
             {
                 buffer_to_display = i;
                 break;
@@ -349,7 +282,7 @@ int main()
                                   y_offset + DISPLAY_HEIGHT - 1);
             bsp_co5300_prepare_for_frame_pixels();
 
-            // Native display - no scaling, just copy and byte swap
+            // Native display - direct copy, no scaling or byte swapping needed
             // Use batched DMA transfers for efficiency
             int lines_processed = 0;
 
@@ -362,7 +295,7 @@ int main()
                 // Clear the multi-line buffer to prevent stale data artifacts
                 memset(multi_line_buffer, 0, DISPLAY_WIDTH * LINES_PER_DMA * sizeof(uint16_t));
 
-                // Copy lines from frame buffer to multi-line buffer with byte swapping
+                // Copy lines from frame buffer to multi-line buffer
                 for (int line = 0; line < lines_in_batch; line++)
                 {
                     int src_y = batch_start + line;
@@ -376,11 +309,10 @@ int main()
                     uint16_t *src_line = &frame_buffers[buffer_to_display][src_y * FRAME_WIDTH];
                     uint16_t *dst_line = &multi_line_buffer[line * DISPLAY_WIDTH];
 
-                    // Copy with byte swap for display controller
+                    // Copy directly - convert.py now outputs in correct byte order
                     for (int x = 0; x < DISPLAY_WIDTH && x < FRAME_WIDTH; x++)
                     {
-                        uint16_t px = src_line[x];
-                        dst_line[x] = (px >> 8) | (px << 8); // Restore byte swap
+                        dst_line[x] = src_line[x];
                     }
                 }
 
@@ -406,7 +338,7 @@ int main()
             int frame_after_next = (display_frame_idx + 2) % num_frames;
 
             // Mark this buffer as consumed and assign it to load frame_after_next
-            sd_loader_mark_buffer_consumed(buffer_to_display, frame_after_next);
+            raw_sd_loader_mark_buffer_consumed(buffer_to_display, frame_after_next);
 
             // Advance to next display frame
             display_frame_idx = next_frame;

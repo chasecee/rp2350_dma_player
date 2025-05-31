@@ -96,9 +96,9 @@ def process_media_file(input_path, base_output_dir, size=(466, 466), rotation=0,
                 g_6bit = (g >> 2) & 0x3F  # Max 111111 (63)
                 b_5bit = (b >> 3) & 0x1F  # Max 11111 (31)
                 rgb565_word = (r_5bit << 11) | (g_6bit << 5) | b_5bit
-                # Encode as two bytes (little-endian)
-                processed_pixels.append(rgb565_word & 0xFF)
+                # Encode as two bytes (big-endian for display controller)
                 processed_pixels.append((rgb565_word >> 8) & 0xFF)
+                processed_pixels.append(rgb565_word & 0xFF)
             pixel_data_bytes = bytes(processed_pixels)
             color_mode_message = "16-bit RGB565"
         else:
