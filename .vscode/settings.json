@@ -48,6 +48,7 @@
     "spi.h": "c",
     "bsp_co5300.h": "c",
     "string.h": "c",
-    "stdlib.h": "c"
+    "stdlib.h": "c",
+    "i2c.h": "c"
   }
 }

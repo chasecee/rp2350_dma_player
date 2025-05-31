@@ -8,7 +8,7 @@
 // Configurable chunk size for reading from SD card
 // Must be a multiple of 512 (SD card sector size)
 // Optimized for 32KB chunks for better SD performance vs single large reads
-#define SD_READ_CHUNK_SIZE 32768 // 32KB chunks for optimal SD performance
+#define SD_READ_CHUNK_SIZE 131072 // 32KB chunks for optimal SD performance
 
 // These dimensions must match those used by the display logic in main.c
 #define FRAME_WIDTH 233  // Updated to 233 for native display

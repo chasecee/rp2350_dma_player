@@ -16,7 +16,7 @@
 
 // Single frames.bin file optimization
 #define FRAME_SIZE_BYTES (FRAME_HEIGHT * FRAME_WIDTH * 2) // Size of one frame in bytes
-#define CHUNK_SIZE_BYTES (32768)                          // Read in 32KB chunks for better SD performance
+#define CHUNK_SIZE_BYTES (131072)                         // Read in 64KB chunks for better SD performance
 
 // Define the actual storage for frame buffers and ready flags
 // Aligned to 32-byte boundary for optimal DMA performance

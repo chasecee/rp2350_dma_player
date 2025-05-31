@@ -312,7 +312,7 @@ int main()
 
 // For native display, use moderate multi-line buffer - large batches cause display duplication
 // The display controller misinterprets large DMA transfers as wide single lines
-#define LINES_PER_DMA 50 // Increased from 25 - fewer batches for better performance
+#define LINES_PER_DMA 233 // Better division: 7 batches of 31 + 1 batch of 16 (instead of 4×58 + 1×1)
     uint16_t *multi_line_buffer = malloc(DISPLAY_WIDTH * LINES_PER_DMA * sizeof(uint16_t));
     if (!multi_line_buffer)
     {
@@ -359,6 +359,9 @@ int main()
                 if (batch_start + lines_in_batch > DISPLAY_HEIGHT)
                     lines_in_batch = DISPLAY_HEIGHT - batch_start;
 
+                // Clear the multi-line buffer to prevent stale data artifacts
+                memset(multi_line_buffer, 0, DISPLAY_WIDTH * LINES_PER_DMA * sizeof(uint16_t));
+
                 // Copy lines from frame buffer to multi-line buffer with byte swapping
                 for (int line = 0; line < lines_in_batch; line++)
                 {
@@ -374,19 +377,14 @@ int main()
                     uint16_t *dst_line = &multi_line_buffer[line * DISPLAY_WIDTH];
 
                     // Copy with byte swap for display controller
-                    for (int x = 0; x < DISPLAY_WIDTH; x++)
+                    for (int x = 0; x < DISPLAY_WIDTH && x < FRAME_WIDTH; x++)
                     {
-                        // Additional bounds check for x coordinate
-                        if (x >= FRAME_WIDTH)
-                        {
-                            break;
-                        }
                         uint16_t px = src_line[x];
                         dst_line[x] = (px >> 8) | (px << 8); // Restore byte swap
                     }
                 }
 
-                // Send this batch via DMA
+                // Send this batch via DMA - only send the actual lines needed
                 while (!dma_transfer_complete)
                     tight_loop_contents();
                 dma_transfer_complete = false;
