@@ -1,1 +1,1 @@
-python convert.py --source ./source --output ./output --size 156 156 --rotate -90 --frame_stride 2 --single-bin --colors 16
+python convert.py --source ./source --output ./output --size 233 233 --rotate -90 --frame_stride 2 --single-bin --colors 16

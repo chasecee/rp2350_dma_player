@@ -49,10 +49,10 @@ void bsp_co5300_set_window(uint16_t x_start, uint16_t y_start, uint16_t x_end, u
  * @brief Flushes a buffer of color data to the display via SPI (DMA or blocking).
  * Assumes CS and DC lines are managed externally for pixel data if part of a larger frame write.
  *
- * @param color_data Pointer to the color data buffer (now uint8_t* for 8-bit pixels).
- * @param num_pixels Number of pixels to flush (each pixel is 1 byte for 8-bit mode).
+ * @param color_data Pointer to the color data buffer (uint8_t* for byte-level access to 16-bit RGB565 pixels).
+ * @param num_bytes Number of bytes to flush (for 16-bit RGB565: num_pixels * 2).
  */
-void bsp_co5300_flush(uint8_t *color_data, size_t num_pixels);
+void bsp_co5300_flush(uint8_t *color_data, size_t num_bytes);
 
 void bsp_co5300_set_brightness(uint8_t brightness);
 void bsp_co5300_set_power(bool on);
