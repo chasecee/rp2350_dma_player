@@ -47,7 +47,7 @@ def crop_and_resize(img, size=(20, 20)):
     img = img.crop((left, top, left + size[0], top + size[1]))
     return img
 
-def process_media_file(input_path, base_output_dir, size=(466, 466), rotation=0, global_frame_idx_offset=0, frame_stride=1, frames_bin_fh=None):
+def process_media_file(input_path, base_output_dir, size=(466, 466), rotation=0, global_frame_idx_offset=0, frame_stride=1, frames_bin_fh=None, args=None):
     reader = imageio.get_reader(input_path)
     base_name = os.path.splitext(os.path.basename(input_path))[0]
     generated_manifest_entries = []
@@ -80,26 +80,42 @@ def process_media_file(input_path, base_output_dir, size=(466, 466), rotation=0,
             first_frame_img_for_master_thumb = img_final_rgb888.copy()
 
         # Use global frame index in filename for better ordering
-        pixels_rgb332 = []
-        for r, g, b in img_final_rgb888.getdata():
-            r_3bit = (r >> 5) & 0x07 # Max 111 (7)
-            g_3bit = (g >> 5) & 0x07 # Max 111 (7)
-            b_2bit = (b >> 6) & 0x03 # Max 11 (3)
-            rgb332_byte = (r_3bit << 5) | (g_3bit << 2) | b_2bit
-            pixels_rgb332.append(rgb332_byte)
-        
-        pixel_data_bytes = bytes(pixels_rgb332)
-        
+        processed_pixels = []
+        if args.colors == 8:
+            for r, g, b in img_final_rgb888.getdata():
+                r_3bit = (r >> 5) & 0x07  # Max 111 (7)
+                g_3bit = (g >> 5) & 0x07  # Max 111 (7)
+                b_2bit = (b >> 6) & 0x03  # Max 11 (3)
+                rgb332_byte = (r_3bit << 5) | (g_3bit << 2) | b_2bit
+                processed_pixels.append(rgb332_byte)
+            pixel_data_bytes = bytes(processed_pixels)
+            color_mode_message = "8-bit RGB332"
+        elif args.colors == 16:
+            for r, g, b in img_final_rgb888.getdata():
+                r_5bit = (r >> 3) & 0x1F  # Max 11111 (31)
+                g_6bit = (g >> 2) & 0x3F  # Max 111111 (63)
+                b_5bit = (b >> 3) & 0x1F  # Max 11111 (31)
+                rgb565_word = (r_5bit << 11) | (g_6bit << 5) | b_5bit
+                # Encode as two bytes (little-endian)
+                processed_pixels.append(rgb565_word & 0xFF)
+                processed_pixels.append((rgb565_word >> 8) & 0xFF)
+            pixel_data_bytes = bytes(processed_pixels)
+            color_mode_message = "16-bit RGB565"
+        else:
+            # This case should not be reached due to argparse choices
+            raise ValueError(f"Unsupported color depth: {args.colors}")
+
         if frames_bin_fh:
             frames_bin_fh.write(pixel_data_bytes)
-            manifest_entry = f"frame-{current_global_frame_idx:05d} offset={current_global_frame_idx * (size[0] * size[1])}"
-            print(f"Saved 8-bit RGB332 frame (original index {original_frame_idx}) to frames.bin (Global Processed Index: {current_global_frame_idx})")
+            bytes_per_pixel = args.colors // 8
+            manifest_entry = f"frame-{current_global_frame_idx:05d} offset={current_global_frame_idx * (size[0] * size[1] * bytes_per_pixel)}"
+            print(f"Saved {color_mode_message} frame (original index {original_frame_idx}) to frames.bin (Global Processed Index: {current_global_frame_idx})")
         else:
             bin_filename = f"frame-{current_global_frame_idx:05d}.bin"
             out_path = os.path.join(base_output_dir, bin_filename)
             with open(out_path, 'wb') as f_bin:
                 f_bin.write(pixel_data_bytes)
-            print(f"Saved 8-bit RGB332 frame (original index {original_frame_idx}) as .bin: {out_path} (Global Processed Index: {current_global_frame_idx})")
+            print(f"Saved {color_mode_message} frame (original index {original_frame_idx}) as .bin: {out_path} (Global Processed Index: {current_global_frame_idx})")
             manifest_entry = bin_filename
         generated_manifest_entries.append(manifest_entry)
         processed_frames_in_this_file_count += 1
@@ -119,6 +135,7 @@ def main():
                         help='Rotation angle in degrees (default: 0)')
     parser.add_argument('--frame_stride', type=int, default=1, help='Process one frame every N frames (default: 1, process all). Value > 0.')
     parser.add_argument('--single-bin', action='store_true', help='Output all frames sequentially into a single frames.bin file instead of separate .bin files')
+    parser.add_argument('--colors', type=int, choices=[8, 16], default=16, help='Color depth (8 for RGB332, 16 for RGB565). Default: 16')
     args = parser.parse_args()
 
     if args.frame_stride <= 0:
@@ -142,9 +159,10 @@ def main():
     print("Pre-allocating all output files to reduce fragmentation...")
     total_expected_files = 4000  # User says at least 3.5k frames
     
-    if total_expected_files > 0:
+    if total_expected_files > 0 and not args.single_bin:
         try:
-            empty_frame = bytes([0] * (output_size[0] * output_size[1]))  # All black frame
+            bytes_per_pixel = args.colors // 8
+            empty_frame = bytes([0] * (output_size[0] * output_size[1] * bytes_per_pixel))  # All black frame
             print(f"Pre-allocating {total_expected_files} files (this may take a moment)...")
             for i in range(0, total_expected_files, 100):  # Progress indicator every 100 files
                 for j in range(min(100, total_expected_files - i)):
@@ -189,7 +207,8 @@ def main():
                 rotation=args.rotate,
                 global_frame_idx_offset=master_frame_counter,
                 frame_stride=args.frame_stride,
-                frames_bin_fh=frames_bin_fh
+                frames_bin_fh=frames_bin_fh,
+                args=args
             )
             
             all_manifest_entries.extend(manifest_entries)
@@ -225,12 +244,21 @@ def main():
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         run_command_file_path = os.path.join(script_dir, "run-command.txt")
-        command_to_write = f"python convert.py --source ./source --output ./output --size {output_size[0]} {output_size[1]} --rotate {args.rotate} --frame_stride {args.frame_stride} --single-bin"
+        # Include --single-bin only if it's true
+        single_bin_arg = " --single-bin" if args.single_bin else ""
+        command_to_write = f"python convert.py --source ./source --output ./output --size {output_size[0]} {output_size[1]} --rotate {args.rotate} --frame_stride {args.frame_stride}{single_bin_arg} --colors {args.colors}"
         with open(run_command_file_path, 'w') as rcf:
             rcf.write(command_to_write + '\n')
         print(f"Updated run command in: {run_command_file_path}")
+
+        # Write colors.txt
+        colors_file_path = os.path.join(script_dir, "colors.txt")
+        with open(colors_file_path, 'w') as cf:
+            cf.write(str(args.colors) + '\n')
+        print(f"Wrote color depth to: {colors_file_path}")
+
     except Exception as e:
-        print(f"Error writing run-command.txt: {e}")
+        print(f"Error writing run-command.txt or colors.txt: {e}")
     # --- End of section ---
 
 if __name__ == '__main__':

@@ -45,15 +45,16 @@
 #pragma message "COMPILING SD_LOADER.C: FF_FS_READONLY is NOT DEFINED"
 #endif
 
-// SD_BUFFER_SIZE is the number of pixels, which is also the number of bytes for 8-bit data.
-#define SD_BUFFER_SIZE (FRAME_HEIGHT * FRAME_WIDTH)
-#define CHUNK_SIZE_BYTES SD_BUFFER_SIZE // Read the whole frame at once
+// SD_BUFFER_SIZE is the number of pixels. For 16-bit data, this is FRAME_HEIGHT * FRAME_WIDTH words (uint16_t).
+// The size in bytes will be FRAME_HEIGHT * FRAME_WIDTH * 2.
+#define FRAME_SIZE_BYTES (FRAME_HEIGHT * FRAME_WIDTH * 2) // Size of one frame in bytes
+#define CHUNK_SIZE_BYTES FRAME_SIZE_BYTES                 // Read the whole frame at once
 
 // Define the actual storage for frame buffers and ready flags
 // Aligned to 32-byte boundary for optimal DMA performance
-__attribute__((aligned(32))) uint8_t frame_buffers[2][FRAME_HEIGHT * FRAME_WIDTH];
-volatile bool buffer_ready[2] = {false, false};
-volatile int target_frame_for_buffer[2] = {-1, -1}; // -1 indicates no specific target initially
+__attribute__((aligned(32))) uint16_t frame_buffers[1][FRAME_HEIGHT * FRAME_WIDTH];
+volatile bool buffer_ready[1] = {false};
+volatile int target_frame_for_buffer[1] = {-1};
 
 // Internal state for the loader
 static struct
@@ -85,7 +86,8 @@ static uint32_t frame_count = 0;
 
 void sd_loader_init(int total_frames)
 {
-    DBG_PRINTF("SD_LOADER: Initializing with %d frames (single-bin mode).\n", total_frames);
+    DBG_PRINTF("SD_LOADER: sd_loader_init called with %d frames\n", total_frames);
+    DBG_PRINTF("SD_LOADER: Initializing with %d frames (single-bin mode, single buffer).\n", total_frames);
     loader_state.total_frames = total_frames;
     if (total_frames == 0)
     {
@@ -93,9 +95,7 @@ void sd_loader_init(int total_frames)
         return;
     }
     buffer_ready[0] = false;
-    buffer_ready[1] = false;
     target_frame_for_buffer[0] = 0;
-    target_frame_for_buffer[1] = (total_frames == 1) ? 0 : 1;
     loader_state.file_is_open = false;
     loader_state.current_buffer_idx = -1;
     loader_state.current_frame_to_load_idx = -1;
@@ -109,29 +109,28 @@ void sd_loader_init(int total_frames)
         return;
     }
     loader_state.file_is_open = true;
-    init_sd_dma();
-    DBG_PRINTF("SD_LOADER: Init complete. Buffer 0 target: %d, Buffer 1 target: %d\n",
-               target_frame_for_buffer[0], target_frame_for_buffer[1]);
+    // init_sd_dma(); // Assuming general DMA is initialized elsewhere if needed for SD f_read, not this module's specific DMA channel.
+    DBG_PRINTF("SD_LOADER: Init complete. Buffer 0 target: %d\n", target_frame_for_buffer[0]);
 }
 
-static bool seek_and_prepare_frame(int buffer_idx_to_load, int frame_idx_to_load)
+static bool seek_and_prepare_frame(int frame_idx_to_load)
 {
     if (frame_idx_to_load < 0)
         frame_idx_to_load = 0;
     frame_idx_to_load = frame_idx_to_load % loader_state.total_frames;
-    if (buffer_idx_to_load < 0 || buffer_idx_to_load > 1)
-        return false;
+
     if (!loader_state.file_is_open)
         return false;
+
     // Seek to the correct offset in frames.bin
-    uint32_t offset = frame_idx_to_load * FRAME_SIZE;
+    uint32_t offset = frame_idx_to_load * FRAME_SIZE_BYTES;
     FRESULT fr = f_lseek(&loader_state.frames_bin_handle, offset);
     if (fr != FR_OK)
     {
         DBG_PRINTF("ERROR: Failed to seek to frame %d (offset %lu) in frames.bin (FR: %d)\n", frame_idx_to_load, offset, fr);
         return false;
     }
-    loader_state.current_buffer_idx = buffer_idx_to_load;
+    loader_state.current_buffer_idx = 0;
     loader_state.current_frame_to_load_idx = frame_idx_to_load;
     loader_state.current_file_offset = 0;
     return true;
@@ -139,98 +138,117 @@ static bool seek_and_prepare_frame(int buffer_idx_to_load, int frame_idx_to_load
 
 void sd_loader_process(void)
 {
+    DBG_PRINTF("SD_LOADER: sd_loader_process called\n");
+    if (frame_buffers == NULL)
+    {
+        DBG_PRINTF("ERROR: frame_buffers is NULL!\n");
+        return;
+    }
     if (loader_state.total_frames == 0)
         return;
-    if (loader_state.current_buffer_idx != -1 && loader_state.current_file_offset < FRAME_SIZE)
-        goto continue_current_load;
-    int buffer_to_process = -1;
+
+    // If the single buffer is not ready and has a valid target frame
     if (!buffer_ready[0] && target_frame_for_buffer[0] >= 0)
-        buffer_to_process = 0;
-    else if (!buffer_ready[1] && target_frame_for_buffer[1] >= 0)
-        buffer_to_process = 1;
-    else if (buffer_ready[0] && target_frame_for_buffer[1] >= 0 && ((target_frame_for_buffer[0] + 1) % loader_state.total_frames) == target_frame_for_buffer[1])
-        buffer_to_process = 1;
-    else if (buffer_ready[1] && target_frame_for_buffer[0] >= 0 && ((target_frame_for_buffer[1] + 1) % loader_state.total_frames) == target_frame_for_buffer[0])
-        buffer_to_process = 0;
-    if (buffer_to_process == -1)
-        return;
-    uint32_t start_time = to_ms_since_boot(get_absolute_time());
-    bool should_preload = (avg_load_time > 0 && avg_load_time > 15);
-    if (!seek_and_prepare_frame(buffer_to_process, target_frame_for_buffer[buffer_to_process]))
-        return;
-continue_current_load:
-    UINT bytes_remaining = FRAME_SIZE - loader_state.current_file_offset;
-    UINT bytes_to_read = bytes_remaining;
-    UINT bytes_read = 0;
-    if (bytes_to_read > 0)
     {
-        uint8_t *buffer_write_ptr = &frame_buffers[loader_state.current_buffer_idx][loader_state.current_file_offset];
-        FRESULT fr = f_read(&loader_state.frames_bin_handle, buffer_write_ptr, bytes_to_read, &bytes_read);
-        if (fr != FR_OK)
+        if (loader_state.current_frame_to_load_idx != target_frame_for_buffer[0] || loader_state.current_buffer_idx != 0)
         {
-            DBG_PRINTF("ERROR: Failed to read frame data from frames.bin (FR: %d)\n", fr);
-            return;
-        }
-        loader_state.current_file_offset += bytes_read;
-        if (loader_state.current_file_offset >= FRAME_SIZE)
-        {
-            buffer_ready[loader_state.current_buffer_idx] = true;
-            loader_state.current_buffer_idx = -1;
-            loader_state.current_frame_to_load_idx = -1;
-            uint32_t end_time = to_ms_since_boot(get_absolute_time());
-            uint32_t load_time = end_time - start_time;
-            if (frame_count < 10)
+            // Need to seek and prepare if not already set up for this frame, or if state is stale
+            if (!seek_and_prepare_frame(target_frame_for_buffer[0]))
             {
-                avg_load_time = ((avg_load_time * frame_count) + load_time) / (frame_count + 1);
-                frame_count++;
+                return; // Error already printed by seek_and_prepare_frame
             }
-            else
-            {
-                avg_load_time = (avg_load_time * 9 + load_time) / 10;
-            }
-            last_frame_load_time = load_time;
-            if (should_preload)
-                sd_loader_process();
         }
-    }
-}
-
-void sd_loader_mark_buffer_consumed(int buffer_idx, int next_target_frame)
-{
-    if (buffer_idx < 0 || buffer_idx > 1)
-        return;
-
-    buffer_ready[buffer_idx] = false;
-
-    // Ensure we properly loop back to the start
-    int new_target;
-    if (next_target_frame >= loader_state.total_frames)
-    {
-        new_target = next_target_frame % loader_state.total_frames;
-        DBG_PRINTF("LOOPING: Frame %d -> %d\n", next_target_frame, new_target);
     }
     else
     {
-        new_target = next_target_frame;
+        // Buffer is ready, or has no valid target, or already processing target. Nothing to initiate now.
+        return;
     }
 
-    target_frame_for_buffer[buffer_idx] = new_target;
+    // At this point, current_buffer_idx should be 0, and current_frame_to_load_idx should match target_frame_for_buffer[0]
+    // and current_file_offset should be 0 for a fresh read.
 
-    // If the file currently open was for the buffer we just consumed, close it
-    if (loader_state.file_is_open && loader_state.current_buffer_idx == buffer_idx)
+    if (loader_state.current_file_offset >= FRAME_SIZE_BYTES)
     {
-        f_close(&loader_state.frames_bin_handle);
-        loader_state.file_is_open = false;
+        // This implies the frame was already loaded conceptually, mark ready if not
+        if (!buffer_ready[0])
+            buffer_ready[0] = true;
+        loader_state.current_buffer_idx = -1; // Reset to allow re-evaluation next call
+        loader_state.current_frame_to_load_idx = -1;
+        return;
+    }
+
+    uint32_t start_time = to_ms_since_boot(get_absolute_time());
+    UINT bytes_to_read = FRAME_SIZE_BYTES - loader_state.current_file_offset;
+    UINT bytes_read = 0;
+
+    uint8_t *buffer_write_ptr_u8 = (uint8_t *)&frame_buffers[0][0] + loader_state.current_file_offset;
+    FRESULT fr = f_read(&loader_state.frames_bin_handle, buffer_write_ptr_u8, bytes_to_read, &bytes_read);
+
+    if (fr != FR_OK)
+    {
+        DBG_PRINTF("ERROR: SD_LOADER: Failed to read frame data (FR: %d) for B0, frame %d.\n",
+                   fr, loader_state.current_frame_to_load_idx);
+        buffer_ready[0] = false;
+        target_frame_for_buffer[0] = -2; // Indicate error/stale target
+        loader_state.current_buffer_idx = -1;
+        loader_state.current_frame_to_load_idx = -1;
+        return;
+    }
+
+    loader_state.current_file_offset += bytes_read;
+
+    if (loader_state.current_file_offset >= FRAME_SIZE_BYTES)
+    {
+        int successfully_loaded_frame = loader_state.current_frame_to_load_idx;
+        buffer_ready[0] = true;
+
+        loader_state.current_buffer_idx = -1;
+        loader_state.current_frame_to_load_idx = -1;
+
+        uint32_t end_time = to_ms_since_boot(get_absolute_time());
+        uint32_t load_time = end_time - start_time;
+        last_frame_load_time = load_time;
+
+        if (frame_count < 10)
+        {
+            avg_load_time = ((avg_load_time * frame_count) + load_time) / (frame_count + 1);
+            frame_count++;
+        }
+        else
+        {
+            avg_load_time = (avg_load_time * 9 + load_time) / 10;
+        }
+        DBG_PRINTF("SD_LOADER: B0 loaded frame %d took %lu ms. Avg: %lu ms.\n",
+                   successfully_loaded_frame, load_time, avg_load_time);
+    }
+    else if (bytes_read == 0 && bytes_to_read > 0)
+    {
+        DBG_PRINTF("WARN: SD_LOADER: Read 0 bytes for B0 frame %d when %u were expected. EOF? FR_CODE %d\n",
+                   loader_state.current_frame_to_load_idx, bytes_to_read, fr);
+        buffer_ready[0] = false;
+        target_frame_for_buffer[0] = -2;
         loader_state.current_buffer_idx = -1;
         loader_state.current_frame_to_load_idx = -1;
     }
 }
 
+void sd_loader_mark_buffer_consumed(int buffer_idx, int next_target_frame)
+{
+    if (buffer_idx != 0)
+        return; // Should not happen with single buffer
+
+    buffer_ready[0] = false;
+    int new_target = next_target_frame % loader_state.total_frames;
+    target_frame_for_buffer[0] = new_target;
+    // DBG_PRINTF("SD_LOADER: B0 consumed. Next target: %d\n", new_target);
+}
+
 int sd_loader_get_target_frame_for_buffer(int buffer_idx)
 {
-    if (buffer_idx < 0 || buffer_idx > 1)
+    if (buffer_idx != 0)
         return -1;
-    return target_frame_for_buffer[buffer_idx];
+    return target_frame_for_buffer[0];
 }
 
 // --- Old sd_loader_get_frame_data implementation (kept for reference, but not used by main.c anymore) ---

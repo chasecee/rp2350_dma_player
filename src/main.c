@@ -23,11 +23,14 @@
 #define SCALE_FACTOR_X ((DISPLAY_WIDTH << 8) / FRAME_WIDTH)
 #define SCALE_FACTOR_Y ((DISPLAY_HEIGHT << 8) / FRAME_HEIGHT)
 
-// RGB332 Color definitions
-#define RED_COLOR_RGB332 0xE0   // 11100000
-#define GREEN_COLOR_RGB332 0x1C // 00011100
-#define BLUE_COLOR_RGB332 0x03  // 00000011
-#define BLACK_COLOR_RGB332 0x00 // 00000000
+// RGB332 Color definitions - Will be changed to RGB565
+#define RED_COLOR_RGB565 0xF800   // 1111100000000000
+#define GREEN_COLOR_RGB565 0x07E0 // 0000011111100000
+#define BLUE_COLOR_RGB565 0x001F  // 0000000000011111
+#define BLACK_COLOR_RGB565 0x0000 // 0000000000000000
+
+// Static buffer for the fully scaled frame (466x466 pixels, 16-bit color) - REMOVED FOR MEMORY
+// static uint16_t full_scaled_frame_buffer[DISPLAY_WIDTH * DISPLAY_HEIGHT];
 
 #define MAX_FILENAME_LEN 64
 #define MAX_FRAMES 4000 // Max number of frames we can list in the manifest - Updated from 100 to support 3.4k+ frames
@@ -73,14 +76,14 @@ void init_scaling_maps(void)
 // Function to clear the entire physical screen to black
 void clear_entire_screen_to_black(void)
 {
-    DBG_PRINTF("Clearing physical screen to black...\n");
+    DBG_PRINTF("Clearing physical screen to black (16-bit)...\n");
     bsp_co5300_set_window(0, 0, PHYSICAL_DISPLAY_WIDTH - 1, PHYSICAL_DISPLAY_HEIGHT - 1);
     bsp_co5300_prepare_for_frame_pixels();
 
-    uint8_t black_line[PHYSICAL_DISPLAY_WIDTH]; // Changed to uint8_t
+    static uint16_t black_line_16bit[PHYSICAL_DISPLAY_WIDTH]; // Use static to avoid large stack allocation
     for (int i = 0; i < PHYSICAL_DISPLAY_WIDTH; i++)
     {
-        black_line[i] = BLACK_COLOR_RGB332; // Black in RGB332
+        black_line_16bit[i] = BLACK_COLOR_RGB565; // Black in RGB565
     }
 
     for (int y = 0; y < PHYSICAL_DISPLAY_HEIGHT; y++)
@@ -90,7 +93,7 @@ void clear_entire_screen_to_black(void)
             sleep_us(0);
         }
         dma_transfer_complete = false;
-        bsp_co5300_flush(black_line, PHYSICAL_DISPLAY_WIDTH); // Length is number of pixels (bytes for 8-bit)
+        bsp_co5300_flush((uint8_t *)black_line_16bit, PHYSICAL_DISPLAY_WIDTH * 2); // Length is number of bytes for 16-bit
     }
     while (!dma_transfer_complete)
     { // Wait for the last flush
@@ -103,12 +106,12 @@ void clear_entire_screen_to_black(void)
 // Function to display a test pattern
 void display_test_pattern(void)
 {
-    DBG_PRINTF("Displaying test pattern\n");
+    DBG_PRINTF("Displaying test pattern (16-bit)\n");
     bsp_co5300_set_window(0, 0, DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1);
-    uint8_t test_pattern_line[DISPLAY_WIDTH]; // Changed to uint8_t
+    static uint16_t test_pattern_line_16bit[DISPLAY_WIDTH]; // Use static for large array
     for (int i = 0; i < DISPLAY_WIDTH; i++)
     {
-        test_pattern_line[i] = (i % 2 == 0) ? RED_COLOR_RGB332 : BLUE_COLOR_RGB332;
+        test_pattern_line_16bit[i] = (i % 2 == 0) ? RED_COLOR_RGB565 : BLUE_COLOR_RGB565;
     }
     bsp_co5300_prepare_for_frame_pixels(); // Prepare once before the loop
     for (int y = 0; y < DISPLAY_HEIGHT; y++)
@@ -118,7 +121,7 @@ void display_test_pattern(void)
             sleep_us(0);
         }
         dma_transfer_complete = false;
-        bsp_co5300_flush(test_pattern_line, DISPLAY_WIDTH);
+        bsp_co5300_flush((uint8_t *)test_pattern_line_16bit, DISPLAY_WIDTH * 2); // Send bytes
     }
     while (!dma_transfer_complete)
     {
@@ -130,7 +133,8 @@ void display_test_pattern(void)
 
 int main()
 {
-    sleep_ms(100); // Reduced from 2000ms - just enough for serial init
+    printf("Hello, Pico!\n"); // Early debug print
+    sleep_ms(100);            // Reduced from 2000ms - just enough for serial init
     stdio_init_all();
     // Set system clock to 150 MHz for RP2350
     // Must be called before PLLs are initialized by other functions (e.g. stdio_init_all might init USB PLL)
@@ -152,7 +156,14 @@ int main()
         .y_offset = 0,
         .brightness = 95,
         .enabled_dma = true,
-        .dma_flush_done_callback = dma_done_callback};
+        .dma_flush_done_callback = dma_done_callback // Ensure not NULL
+    };
+    if (!display_info.dma_flush_done_callback)
+    {
+        printf("ERROR: dma_flush_done_callback is NULL!\n");
+        while (1)
+            ;
+    }
     bsp_co5300_init(&display_info);
     DBG_PRINTF("MAIN: Display initialized.\n");
 
@@ -202,10 +213,10 @@ int main()
     }
     // Get file size and compute number of frames
     uint32_t frames_bin_size = f_size(&frames_bin_fil);
-    num_frames = frames_bin_size / (FRAME_WIDTH * FRAME_HEIGHT);
+    num_frames = frames_bin_size / (FRAME_WIDTH * FRAME_HEIGHT * 2); // 2 bytes per pixel for RGB565
     f_close(&frames_bin_fil);
 
-    DBG_PRINTF("Found %d frames in frames.bin.\n", num_frames);
+    DBG_PRINTF("Found %d frames in frames.bin (16-bit RGB565 format expected).\n", num_frames);
 
     // Initialize the SD Loader module
     sd_loader_init(num_frames);
@@ -213,15 +224,15 @@ int main()
     if (num_frames == 0)
     {
         printf("No frames found. Displaying error pattern.\n");
-        uint8_t error_colors[] = {RED_COLOR_RGB332, BLUE_COLOR_RGB332, GREEN_COLOR_RGB332};
+        uint16_t error_colors[] = {RED_COLOR_RGB565, BLUE_COLOR_RGB565, GREEN_COLOR_RGB565};
         int error_color_index = 0;
         while (1)
         {
             bsp_co5300_set_window(0, 0, PHYSICAL_DISPLAY_WIDTH - 1, PHYSICAL_DISPLAY_HEIGHT - 1);
-            uint8_t error_line_buffer[PHYSICAL_DISPLAY_WIDTH];
+            uint16_t error_line_buffer_16bit[PHYSICAL_DISPLAY_WIDTH];
             for (int i = 0; i < PHYSICAL_DISPLAY_WIDTH; i++)
             {
-                error_line_buffer[i] = error_colors[error_color_index];
+                error_line_buffer_16bit[i] = error_colors[error_color_index];
             }
             bsp_co5300_prepare_for_frame_pixels();
             for (int y = 0; y < PHYSICAL_DISPLAY_HEIGHT; y++)
@@ -231,7 +242,7 @@ int main()
                     sleep_us(0);
                 }
                 dma_transfer_complete = false;
-                bsp_co5300_flush(error_line_buffer, PHYSICAL_DISPLAY_WIDTH);
+                bsp_co5300_flush((uint8_t *)error_line_buffer_16bit, PHYSICAL_DISPLAY_WIDTH * 2); // Send bytes
             }
             while (!dma_transfer_complete)
             {
@@ -243,23 +254,23 @@ int main()
         }
     }
 
-// Buffer to hold two entire source frames in RAM for double buffering - MOVED TO SD_LOADER
-// static uint16_t frame_buffers[2][FRAME_HEIGHT * FRAME_WIDTH]; // THIS LINE SHOULD REMAIN COMMENTED OR BE DELETED
-// int current_buffer = 0; // Will be replaced by display_buffer_idx_for_display
+    // Buffer to hold two entire source frames in RAM for double buffering - MOVED TO SD_LOADER
+    // static uint16_t frame_buffers[2][FRAME_HEIGHT * FRAME_WIDTH]; // THIS LINE SHOULD REMAIN COMMENTED OR BE DELETED
+    // int current_buffer = 0; // Will be replaced by display_buffer_idx_for_display
 
-// DMA line buffers (for display)
-// Define how many lines to buffer for each DMA transfer
-#define LINES_PER_BUFFER FRAME_HEIGHT                              // Process entire frame at once - we have the RAM
-    uint8_t frame_line_buffer_a[DISPLAY_WIDTH * LINES_PER_BUFFER]; // Changed to uint8_t
-    uint8_t frame_line_buffer_b[DISPLAY_WIDTH * LINES_PER_BUFFER]; // Changed to uint8_t
-    volatile uint8_t *cpu_buffer_ptr;                              // Changed to uint8_t*
-    volatile uint8_t *dma_buffer_ptr;                              // Changed to uint8_t*
+    // DMA line buffers (for display)
+    // Define how many lines to buffer for each DMA transfer
+    // #define LINES_PER_BUFFER FRAME_HEIGHT                              // Process entire frame at once - we have the RAM
+    //     uint8_t frame_line_buffer_a[DISPLAY_WIDTH * LINES_PER_BUFFER]; // Changed to uint8_t
+    //     uint8_t frame_line_buffer_b[DISPLAY_WIDTH * LINES_PER_BUFFER]; // Changed to uint8_t
+    //     volatile uint8_t *cpu_buffer_ptr;                              // Changed to uint8_t*
+    //     volatile uint8_t *dma_buffer_ptr;                              // Changed to uint8_t*
 
     // FIL frame_fil; // Moved to sd_loader.c
     // UINT bytes_read_for_full_frame; // Not needed with chunked loading this way
     // char current_frame_full_path[MAX_FILENAME_LEN + 8]; // Handled by sd_loader
 
-    DBG_PRINTF("Starting 8-bit RGB332 animation loop (%d frames, %dx%d -> %dx%d).\n",
+    DBG_PRINTF("Starting 16-bit RGB565 animation loop (%d frames, %dx%d -> %dx%d).\n",
                num_frames, FRAME_WIDTH, FRAME_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
     // Pre-load first frame into buffer 0 - REMOVED (handled by sd_loader_process calls)
@@ -283,8 +294,8 @@ int main()
     absolute_time_t frame_start_time = get_absolute_time();
     const uint32_t target_frame_us = 33333; // Target ~30fps (33.333ms)
 
-    // Allocate a line buffer for the display
-    uint8_t *scaled_line_buffer = malloc(DISPLAY_WIDTH);
+    // Allocate a line buffer for the display (16-bit pixels)
+    uint16_t *scaled_line_buffer = malloc(DISPLAY_WIDTH * sizeof(uint16_t));
     if (!scaled_line_buffer)
     {
         printf("Failed to allocate scaled line buffer!\n");
@@ -297,18 +308,8 @@ int main()
         // Process SD card loading first
         sd_loader_process();
 
-        // Check if either buffer has the frame we want to display
-        int buffer_with_frame = -1;
+        // Check if the single buffer has the frame we want to display
         if (buffer_ready[0] && sd_loader_get_target_frame_for_buffer(0) == display_frame_idx)
-        {
-            buffer_with_frame = 0;
-        }
-        else if (buffer_ready[1] && sd_loader_get_target_frame_for_buffer(1) == display_frame_idx)
-        {
-            buffer_with_frame = 1;
-        }
-
-        if (buffer_with_frame >= 0)
         {
             // Set up display window for full content
             bsp_co5300_set_window(x_offset, y_offset,
@@ -316,37 +317,44 @@ int main()
                                   y_offset + DISPLAY_HEIGHT - 1);
             bsp_co5300_prepare_for_frame_pixels();
 
-            // Get pointer to source frame
-            uint8_t *src_buffer = frame_buffers[buffer_with_frame];
+            // Get pointer to source frame (always buffer 0)
+            uint16_t *src_buffer = frame_buffers[0];
 
             // 3x integer scaling: for each display line, fill from the corresponding input line
-            for (int y = 0; y < DISPLAY_HEIGHT; y++)
+            for (int y_disp = 0; y_disp < DISPLAY_HEIGHT; y_disp++)
             {
-                int src_y = y / 3;
-                uint8_t *src_line = &src_buffer[src_y * FRAME_WIDTH];
-                for (int x = 0; x < DISPLAY_WIDTH; x++)
+                int src_y = y_disp / 3;
+                uint16_t *src_line = &src_buffer[src_y * FRAME_WIDTH];
+                for (int x_disp = 0; x_disp < DISPLAY_WIDTH; x_disp++)
                 {
-                    int src_x = x / 3;
-                    scaled_line_buffer[x] = src_line[src_x];
+                    int src_x = x_disp / 3;
+                    scaled_line_buffer[x_disp] = src_line[src_x];
+                }
+                // Swap bytes for each pixel to match display's big-endian RGB565
+                for (int i = 0; i < DISPLAY_WIDTH; i++)
+                {
+                    uint16_t px = scaled_line_buffer[i];
+                    scaled_line_buffer[i] = (px >> 8) | (px << 8);
                 }
                 while (!dma_transfer_complete)
                     tight_loop_contents();
                 dma_transfer_complete = false;
-                bsp_co5300_flush(scaled_line_buffer, DISPLAY_WIDTH);
+                bsp_co5300_flush((uint8_t *)scaled_line_buffer, DISPLAY_WIDTH * sizeof(uint16_t)); // Send bytes for one 16-bit line
             }
 
-            // Wait for the last DMA transfer
+            // Wait for the last DMA transfer (for the full frame)
             while (!dma_transfer_complete)
                 tight_loop_contents();
             bsp_co5300_finish_frame_pixels();
 
             // Frame display complete, advance to next
-            int next_frame_to_target = display_frame_idx + 2;
+            // For single buffer, the next frame to target is simply the next one in sequence.
+            int next_frame_to_target = (display_frame_idx + 1) % num_frames;
 
-            // Mark current buffer as consumed and set its next target
-            sd_loader_mark_buffer_consumed(buffer_with_frame, next_frame_to_target % num_frames);
+            // Mark buffer 0 as consumed and set its next target
+            sd_loader_mark_buffer_consumed(0, next_frame_to_target);
 
-            // Advance to next frame
+            // Advance to next display frame
             display_frame_idx = (display_frame_idx + 1) % num_frames;
 
             // Frame timing control

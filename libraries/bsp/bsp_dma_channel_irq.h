@@ -8,7 +8,7 @@
 
 typedef void (*channel_irq_callback_t)(void);
 
-
+extern void bsp_dma_channel_irq_handler(void);
 
 void bsp_dma_channel_irq1_init(void);
 void bsp_dma_channel_irq_add(uint8_t irq_num, uint dma_channel, channel_irq_callback_t callback);
