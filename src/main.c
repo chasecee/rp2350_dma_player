@@ -18,7 +18,7 @@
 #define FRAME_HEIGHT 156
 
 // Set to 1 for native 156x156 output, 0 for 466x466 scaled output
-#define NATIVE_OUTPUT 1
+#define NATIVE_OUTPUT 0
 
 #if NATIVE_OUTPUT
 #define DISPLAY_WIDTH 156
@@ -55,6 +55,28 @@ static uint16_t source_x_map[DISPLAY_WIDTH];
 
 volatile bool dma_transfer_complete = true; // Flag for DMA completion (for display flushing)
 
+// Optimized 3x scaling function
+static inline void scale_line_3x_optimized(uint16_t *dst, const uint16_t *src, int src_width)
+{
+    // Process in groups of 3 output pixels (1 source pixel)
+    for (int src_x = 0; src_x < src_width; src_x++)
+    {
+        uint16_t px = src[src_x];
+        uint16_t swapped = (px >> 8) | (px << 8); // Byte swap once
+        int dst_x = src_x * 3;
+        // Write the same pixel 3 times
+        dst[dst_x] = swapped;
+        dst[dst_x + 1] = swapped;
+        dst[dst_x + 2] = swapped;
+    }
+    // Handle the last 2 pixels if 466 instead of 468
+    if (DISPLAY_WIDTH == 466)
+    {
+        // The last source pixel only gets repeated twice
+        dst[465] = dst[464]; // Just copy the previous pixel
+    }
+}
+
 // Callback function for DMA
 void dma_done_callback(void)
 {
@@ -67,16 +89,16 @@ void init_scaling_maps(void)
     DBG_PRINTF("Initializing scaling maps for %dx%d -> %dx%d...\n",
                FRAME_WIDTH, FRAME_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
-    // Precompute source Y coordinates for each destination Y
+    // For 3x integer scaling: 156x156 -> 468x468 (close to 466x466)
+    // Each display pixel maps to source pixel at (y/3, x/3)
     for (int i = 0; i < DISPLAY_HEIGHT; i++)
     {
-        source_y_map[i] = (i * FRAME_HEIGHT) / DISPLAY_HEIGHT;
+        source_y_map[i] = i / 3; // Simple integer division, precomputed once
     }
 
-    // Precompute source X coordinates for each destination X
     for (int i = 0; i < DISPLAY_WIDTH; i++)
     {
-        source_x_map[i] = (i * FRAME_WIDTH) / DISPLAY_WIDTH;
+        source_x_map[i] = i / 3; // Simple integer division, precomputed once
     }
 
     DBG_PRINTF("Scaling maps initialized.\n");
@@ -303,6 +325,12 @@ int main()
     absolute_time_t frame_start_time = get_absolute_time();
     const uint32_t target_frame_us = 33333; // Target ~30fps (33.333ms)
 
+    // Profiling variables
+    uint32_t sd_load_time_us = 0;
+    uint32_t display_time_us = 0;
+    uint32_t frame_counter = 0;
+    absolute_time_t profile_start;
+
     // Allocate a line buffer for the display (16-bit pixels)
     uint16_t *scaled_line_buffer = malloc(DISPLAY_WIDTH * sizeof(uint16_t));
     if (!scaled_line_buffer)
@@ -312,14 +340,38 @@ int main()
             tight_loop_contents();
     }
 
+// Allocate a multi-line buffer for batch DMA transfers
+#define LINES_PER_DMA 78 // Send 78 lines at a time (26 source lines × 3)
+    uint16_t *multi_line_buffer = malloc(DISPLAY_WIDTH * LINES_PER_DMA * sizeof(uint16_t));
+    if (!multi_line_buffer)
+    {
+        printf("Failed to allocate multi-line buffer!\n");
+        while (1)
+            tight_loop_contents();
+    }
+
     while (1)
     {
         // Process SD card loading first
+        profile_start = get_absolute_time();
         sd_loader_process();
+        sd_load_time_us = absolute_time_diff_us(profile_start, get_absolute_time());
 
-        // Check if the single buffer has the frame we want to display
-        if (buffer_ready[0] && sd_loader_get_target_frame_for_buffer(0) == display_frame_idx)
+        // Check which buffer has the frame we want to display
+        int buffer_to_display = -1;
+        for (int i = 0; i < 2; i++)
         {
+            if (buffer_ready[i] && sd_loader_get_target_frame_for_buffer(i) == display_frame_idx)
+            {
+                buffer_to_display = i;
+                break;
+            }
+        }
+
+        if (buffer_to_display >= 0)
+        {
+            profile_start = get_absolute_time();
+
             // Set up display window for full content
             if (NATIVE_OUTPUT)
             {
@@ -332,7 +384,7 @@ int main()
                 // No scaling, just copy the line directly
                 for (int y_disp = 0; y_disp < DISPLAY_HEIGHT; y_disp++)
                 {
-                    uint16_t *src_line = &frame_buffers[0][y_disp * FRAME_WIDTH];
+                    uint16_t *src_line = &frame_buffers[buffer_to_display][y_disp * FRAME_WIDTH];
                     for (int x_disp = 0; x_disp < DISPLAY_WIDTH; x_disp++)
                     {
                         scaled_line_buffer[x_disp] = src_line[x_disp];
@@ -351,25 +403,42 @@ int main()
             }
             else
             {
-                // 3x integer scaling: for each display line, fill from the corresponding input line
-                for (int y_disp = 0; y_disp < DISPLAY_HEIGHT; y_disp++)
+                bsp_co5300_set_window(0, 0, DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1);
+                bsp_co5300_prepare_for_frame_pixels();
+
+                // Optimized 3x integer scaling with batched DMA transfers
+                for (int src_y = 0; src_y < FRAME_HEIGHT; src_y++)
                 {
-                    int src_y = y_disp / 3;
-                    uint16_t *src_line = &frame_buffers[0][src_y * FRAME_WIDTH];
-                    for (int x_disp = 0; x_disp < DISPLAY_WIDTH; x_disp++)
+                    uint16_t *src_line = &frame_buffers[buffer_to_display][src_y * FRAME_WIDTH];
+
+                    // Scale this source line once
+                    scale_line_3x_optimized(scaled_line_buffer, src_line, FRAME_WIDTH);
+
+                    // Copy the scaled line 3 times into multi-line buffer
+                    for (int repeat = 0; repeat < 3; repeat++)
                     {
-                        int src_x = x_disp / 3;
-                        scaled_line_buffer[x_disp] = src_line[src_x];
+                        int dest_y = src_y * 3 + repeat;
+                        if (dest_y >= DISPLAY_HEIGHT)
+                            break;
+
+                        // Copy into the appropriate position in multi_line_buffer
+                        int buffer_line = dest_y % LINES_PER_DMA;
+                        uint16_t *dest_ptr = &multi_line_buffer[buffer_line * DISPLAY_WIDTH];
+
+                        // Direct copy - the data is already byte-swapped from scale_line_3x_optimized
+                        memcpy(dest_ptr, scaled_line_buffer, DISPLAY_WIDTH * sizeof(uint16_t));
+
+                        // If we've filled the buffer or reached the last line, send it
+                        if (buffer_line == (LINES_PER_DMA - 1) || dest_y == (DISPLAY_HEIGHT - 1))
+                        {
+                            int lines_to_send = buffer_line + 1;
+                            while (!dma_transfer_complete)
+                                tight_loop_contents();
+                            dma_transfer_complete = false;
+                            bsp_co5300_flush((uint8_t *)multi_line_buffer,
+                                             DISPLAY_WIDTH * lines_to_send * sizeof(uint16_t));
+                        }
                     }
-                    for (int i = 0; i < DISPLAY_WIDTH; i++)
-                    {
-                        uint16_t px = scaled_line_buffer[i];
-                        scaled_line_buffer[i] = (px >> 8) | (px << 8);
-                    }
-                    while (!dma_transfer_complete)
-                        tight_loop_contents();
-                    dma_transfer_complete = false;
-                    bsp_co5300_flush((uint8_t *)scaled_line_buffer, DISPLAY_WIDTH * sizeof(uint16_t));
                 }
             }
 
@@ -378,19 +447,29 @@ int main()
                 tight_loop_contents();
             bsp_co5300_finish_frame_pixels();
 
-            // Frame display complete, advance to next
-            // For single buffer, the next frame to target is simply the next one in sequence.
-            int next_frame_to_target = (display_frame_idx + 1) % num_frames;
+            display_time_us = absolute_time_diff_us(profile_start, get_absolute_time());
 
-            // Mark buffer 0 as consumed and set its next target
-            sd_loader_mark_buffer_consumed(0, next_frame_to_target);
+            // Frame display complete, advance to next
+            // Calculate which frame we'll need after this one
+            int next_frame = (display_frame_idx + 1) % num_frames;
+            int frame_after_next = (display_frame_idx + 2) % num_frames;
+
+            // Mark this buffer as consumed and assign it to load frame_after_next
+            sd_loader_mark_buffer_consumed(buffer_to_display, frame_after_next);
 
             // Advance to next display frame
-            display_frame_idx = (display_frame_idx + 1) % num_frames;
+            display_frame_idx = next_frame;
 
             // Frame timing control
             absolute_time_t now = get_absolute_time();
             int64_t frame_time = absolute_time_diff_us(frame_start_time, now);
+
+            // Print profiling info every 30 frames (1 second at 30fps)
+            if (++frame_counter % 30 == 0)
+            {
+                DBG_PRINTF("PROFILE: Frame %d - SD load: %lu us, Display: %lu us, Total: %lld us (Target: %lu us)\n",
+                           frame_counter, sd_load_time_us, display_time_us, frame_time, target_frame_us);
+            }
 
             if (frame_time < target_frame_us)
             {

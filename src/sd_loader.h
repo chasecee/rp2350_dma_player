@@ -7,8 +7,8 @@
 
 // Configurable chunk size for reading from SD card
 // Must be a multiple of 512 (SD card sector size)
-// Increased to 32KB for better throughput
-#define SD_READ_CHUNK_SIZE 32768
+// Increased to 48KB for better throughput
+#define SD_READ_CHUNK_SIZE 49152  // 48KB to read full 156x156x2 frames in one shot!
 
 // These dimensions must match those used by the display logic in main.c
 #define FRAME_WIDTH 156  // Match main.c source frame size (back to 156 for 3x scaling)
@@ -20,14 +20,10 @@
 
 // WARNING: Only one buffer is supported. All code must use index 0 for frame_buffers, buffer_ready, and target_frame_for_buffer.
 
-// Buffer for one full frame (16-bit pixels)
-// Aligned to 32-byte boundary for optimal DMA performance
-__attribute__((aligned(32))) extern uint16_t frame_buffers[1][FRAME_HEIGHT * FRAME_WIDTH];
-
-// Flags indicating if a buffer contains a fully loaded, ready-to-display frame
-extern volatile bool buffer_ready[1];
-// Target frame index for each buffer (-1 if no target)
-extern volatile int target_frame_for_buffer[1];
+// Buffers managed by sd_loader.c
+extern uint16_t frame_buffers[2][FRAME_HEIGHT * FRAME_WIDTH];  // Changed from [1] to [2] for double buffering
+extern volatile bool buffer_ready[2];  // Changed from [1] to [2]
+extern volatile int target_frame_for_buffer[2];  // Changed from [1] to [2]
 
 /**
  * @brief Initializes the SD card loader module.

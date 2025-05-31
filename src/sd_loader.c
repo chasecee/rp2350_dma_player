@@ -52,9 +52,9 @@
 
 // Define the actual storage for frame buffers and ready flags
 // Aligned to 32-byte boundary for optimal DMA performance
-__attribute__((aligned(32))) uint16_t frame_buffers[1][FRAME_HEIGHT * FRAME_WIDTH];
-volatile bool buffer_ready[1] = {false};
-volatile int target_frame_for_buffer[1] = {-1};
+__attribute__((aligned(32))) uint16_t frame_buffers[2][FRAME_HEIGHT * FRAME_WIDTH];
+volatile bool buffer_ready[2] = {false, false};
+volatile int target_frame_for_buffer[2] = {-1, -1};
 
 // Internal state for the loader
 static struct
@@ -87,7 +87,7 @@ static uint32_t frame_count = 0;
 void sd_loader_init(int total_frames)
 {
     DBG_PRINTF("SD_LOADER: sd_loader_init called with %d frames\n", total_frames);
-    DBG_PRINTF("SD_LOADER: Initializing with %d frames (single-bin mode, single buffer).\n", total_frames);
+    DBG_PRINTF("SD_LOADER: Initializing with %d frames (single-bin mode, DOUBLE buffer).\n", total_frames);
     loader_state.total_frames = total_frames;
     if (total_frames == 0)
     {
@@ -95,7 +95,9 @@ void sd_loader_init(int total_frames)
         return;
     }
     buffer_ready[0] = false;
-    target_frame_for_buffer[0] = 0;
+    buffer_ready[1] = false;
+    target_frame_for_buffer[0] = 0; // Buffer 0 loads frame 0
+    target_frame_for_buffer[1] = 1; // Buffer 1 loads frame 1
     loader_state.file_is_open = false;
     loader_state.current_buffer_idx = -1;
     loader_state.current_frame_to_load_idx = -1;
@@ -138,7 +140,6 @@ static bool seek_and_prepare_frame(int frame_idx_to_load)
 
 void sd_loader_process(void)
 {
-    DBG_PRINTF("SD_LOADER: sd_loader_process called\n");
     if (frame_buffers == NULL)
     {
         DBG_PRINTF("ERROR: frame_buffers is NULL!\n");
@@ -147,32 +148,51 @@ void sd_loader_process(void)
     if (loader_state.total_frames == 0)
         return;
 
-    // If the single buffer is not ready and has a valid target frame
-    if (!buffer_ready[0] && target_frame_for_buffer[0] >= 0)
+    // Check both buffers to see which one needs loading
+    int buffer_to_load = -1;
+
+    // If we're not currently loading anything, pick a buffer to load
+    if (loader_state.current_buffer_idx == -1)
     {
-        if (loader_state.current_frame_to_load_idx != target_frame_for_buffer[0] || loader_state.current_buffer_idx != 0)
+        for (int i = 0; i < 2; i++)
         {
-            // Need to seek and prepare if not already set up for this frame, or if state is stale
-            if (!seek_and_prepare_frame(target_frame_for_buffer[0]))
+            if (!buffer_ready[i] && target_frame_for_buffer[i] >= 0)
             {
-                return; // Error already printed by seek_and_prepare_frame
+                buffer_to_load = i;
+                break;
             }
         }
     }
     else
     {
-        // Buffer is ready, or has no valid target, or already processing target. Nothing to initiate now.
+        // Continue loading the current buffer
+        buffer_to_load = loader_state.current_buffer_idx;
+    }
+
+    if (buffer_to_load == -1)
+    {
+        // No buffer needs loading right now
         return;
     }
 
-    // At this point, current_buffer_idx should be 0, and current_frame_to_load_idx should match target_frame_for_buffer[0]
-    // and current_file_offset should be 0 for a fresh read.
+    // If we're starting a new load, seek to the frame
+    if (loader_state.current_buffer_idx != buffer_to_load ||
+        loader_state.current_frame_to_load_idx != target_frame_for_buffer[buffer_to_load])
+    {
+        if (!seek_and_prepare_frame(target_frame_for_buffer[buffer_to_load]))
+        {
+            return;
+        }
+        loader_state.current_buffer_idx = buffer_to_load;
+    }
+
+    // At this point, current_buffer_idx is set and current_frame_to_load_idx matches the target
 
     if (loader_state.current_file_offset >= FRAME_SIZE_BYTES)
     {
         // This implies the frame was already loaded conceptually, mark ready if not
-        if (!buffer_ready[0])
-            buffer_ready[0] = true;
+        if (!buffer_ready[buffer_to_load])
+            buffer_ready[buffer_to_load] = true;
         loader_state.current_buffer_idx = -1; // Reset to allow re-evaluation next call
         loader_state.current_frame_to_load_idx = -1;
         return;
@@ -182,15 +202,15 @@ void sd_loader_process(void)
     UINT bytes_to_read = FRAME_SIZE_BYTES - loader_state.current_file_offset;
     UINT bytes_read = 0;
 
-    uint8_t *buffer_write_ptr_u8 = (uint8_t *)&frame_buffers[0][0] + loader_state.current_file_offset;
+    uint8_t *buffer_write_ptr_u8 = (uint8_t *)&frame_buffers[buffer_to_load][0] + loader_state.current_file_offset;
     FRESULT fr = f_read(&loader_state.frames_bin_handle, buffer_write_ptr_u8, bytes_to_read, &bytes_read);
 
     if (fr != FR_OK)
     {
-        DBG_PRINTF("ERROR: SD_LOADER: Failed to read frame data (FR: %d) for B0, frame %d.\n",
-                   fr, loader_state.current_frame_to_load_idx);
-        buffer_ready[0] = false;
-        target_frame_for_buffer[0] = -2; // Indicate error/stale target
+        DBG_PRINTF("ERROR: SD_LOADER: Failed to read frame data (FR: %d) for B%d, frame %d.\n",
+                   buffer_to_load, buffer_to_load, loader_state.current_frame_to_load_idx);
+        buffer_ready[buffer_to_load] = false;
+        target_frame_for_buffer[buffer_to_load] = -2; // Indicate error/stale target
         loader_state.current_buffer_idx = -1;
         loader_state.current_frame_to_load_idx = -1;
         return;
@@ -201,7 +221,7 @@ void sd_loader_process(void)
     if (loader_state.current_file_offset >= FRAME_SIZE_BYTES)
     {
         int successfully_loaded_frame = loader_state.current_frame_to_load_idx;
-        buffer_ready[0] = true;
+        buffer_ready[buffer_to_load] = true;
 
         loader_state.current_buffer_idx = -1;
         loader_state.current_frame_to_load_idx = -1;
@@ -219,15 +239,15 @@ void sd_loader_process(void)
         {
             avg_load_time = (avg_load_time * 9 + load_time) / 10;
         }
-        DBG_PRINTF("SD_LOADER: B0 loaded frame %d took %lu ms. Avg: %lu ms.\n",
-                   successfully_loaded_frame, load_time, avg_load_time);
+        DBG_PRINTF("SD_LOADER: B%d loaded frame %d took %lu ms. Avg: %lu ms.\n",
+                   buffer_to_load, successfully_loaded_frame, load_time, avg_load_time);
     }
     else if (bytes_read == 0 && bytes_to_read > 0)
     {
-        DBG_PRINTF("WARN: SD_LOADER: Read 0 bytes for B0 frame %d when %u were expected. EOF? FR_CODE %d\n",
-                   loader_state.current_frame_to_load_idx, bytes_to_read, fr);
-        buffer_ready[0] = false;
-        target_frame_for_buffer[0] = -2;
+        DBG_PRINTF("WARN: SD_LOADER: Read 0 bytes for B%d frame %d when %u were expected. EOF? FR_CODE %d\n",
+                   buffer_to_load, loader_state.current_frame_to_load_idx, bytes_to_read, fr);
+        buffer_ready[buffer_to_load] = false;
+        target_frame_for_buffer[buffer_to_load] = -2;
         loader_state.current_buffer_idx = -1;
         loader_state.current_frame_to_load_idx = -1;
     }
@@ -235,20 +255,20 @@ void sd_loader_process(void)
 
 void sd_loader_mark_buffer_consumed(int buffer_idx, int next_target_frame)
 {
-    if (buffer_idx != 0)
-        return; // Should not happen with single buffer
+    if (buffer_idx < 0 || buffer_idx > 1)
+        return; // Invalid buffer index
 
-    buffer_ready[0] = false;
+    buffer_ready[buffer_idx] = false;
     int new_target = next_target_frame % loader_state.total_frames;
-    target_frame_for_buffer[0] = new_target;
-    // DBG_PRINTF("SD_LOADER: B0 consumed. Next target: %d\n", new_target);
+    target_frame_for_buffer[buffer_idx] = new_target;
+    // DBG_PRINTF("SD_LOADER: B%d consumed. Next target: %d\n", buffer_idx, new_target);
 }
 
 int sd_loader_get_target_frame_for_buffer(int buffer_idx)
 {
-    if (buffer_idx != 0)
+    if (buffer_idx < 0 || buffer_idx > 1)
         return -1;
-    return target_frame_for_buffer[0];
+    return target_frame_for_buffer[buffer_idx];
 }
 
 // --- Old sd_loader_get_frame_data implementation (kept for reference, but not used by main.c anymore) ---
@@ -291,4 +311,5 @@ int sd_loader_get_target_frame_for_buffer(int buffer_idx)
 
 //     *buffer_idx_used = 0;
 //     return frame_buffers[0];
+// }
 // }
