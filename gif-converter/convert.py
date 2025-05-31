@@ -47,7 +47,7 @@ def crop_and_resize(img, size=(20, 20)):
     img = img.crop((left, top, left + size[0], top + size[1]))
     return img
 
-def process_media_file(input_path, base_output_dir, size=(466, 466), rotation=0, global_frame_idx_offset=0, frame_stride=1):
+def process_media_file(input_path, base_output_dir, size=(466, 466), rotation=0, global_frame_idx_offset=0, frame_stride=1, frames_bin_fh=None):
     reader = imageio.get_reader(input_path)
     base_name = os.path.splitext(os.path.basename(input_path))[0]
     generated_manifest_entries = []
@@ -80,9 +80,6 @@ def process_media_file(input_path, base_output_dir, size=(466, 466), rotation=0,
             first_frame_img_for_master_thumb = img_final_rgb888.copy()
 
         # Use global frame index in filename for better ordering
-        bin_filename = f"frame-{current_global_frame_idx:05d}.bin"
-        out_path = os.path.join(base_output_dir, bin_filename)
-        
         pixels_rgb332 = []
         for r, g, b in img_final_rgb888.getdata():
             r_3bit = (r >> 5) & 0x07 # Max 111 (7)
@@ -92,12 +89,18 @@ def process_media_file(input_path, base_output_dir, size=(466, 466), rotation=0,
             pixels_rgb332.append(rgb332_byte)
         
         pixel_data_bytes = bytes(pixels_rgb332)
-                
-        with open(out_path, 'wb') as f_bin:
-            f_bin.write(pixel_data_bytes)
-            
-        print(f"Saved 8-bit RGB332 frame (original index {original_frame_idx}) as .bin: {out_path} (Global Processed Index: {current_global_frame_idx})")
-        manifest_entry = bin_filename
+        
+        if frames_bin_fh:
+            frames_bin_fh.write(pixel_data_bytes)
+            manifest_entry = f"frame-{current_global_frame_idx:05d} offset={current_global_frame_idx * (size[0] * size[1])}"
+            print(f"Saved 8-bit RGB332 frame (original index {original_frame_idx}) to frames.bin (Global Processed Index: {current_global_frame_idx})")
+        else:
+            bin_filename = f"frame-{current_global_frame_idx:05d}.bin"
+            out_path = os.path.join(base_output_dir, bin_filename)
+            with open(out_path, 'wb') as f_bin:
+                f_bin.write(pixel_data_bytes)
+            print(f"Saved 8-bit RGB332 frame (original index {original_frame_idx}) as .bin: {out_path} (Global Processed Index: {current_global_frame_idx})")
+            manifest_entry = bin_filename
         generated_manifest_entries.append(manifest_entry)
         processed_frames_in_this_file_count += 1
         
@@ -115,6 +118,7 @@ def main():
     parser.add_argument('--rotate', type=int, choices=[0, 90, 180, -90], default=0,
                         help='Rotation angle in degrees (default: 0)')
     parser.add_argument('--frame_stride', type=int, default=1, help='Process one frame every N frames (default: 1, process all). Value > 0.')
+    parser.add_argument('--single-bin', action='store_true', help='Output all frames sequentially into a single frames.bin file instead of separate .bin files')
     args = parser.parse_args()
 
     if args.frame_stride <= 0:
@@ -168,6 +172,11 @@ def main():
     first_file_processed = True # To ensure master thumbnail is from the very first processed frame of the first file
     script_dir = os.path.dirname(os.path.abspath(__file__)) # Get script's directory
     
+    frames_bin_fh = None
+    if args.single_bin:
+        frames_bin_path = os.path.join(args.output, 'frames.bin')
+        frames_bin_fh = open(frames_bin_path, 'wb')
+
     for fname in os.listdir(args.source):
         if fname.lower().endswith(('.gif', '.mp4')):
             in_path = os.path.join(args.source, fname)
@@ -179,7 +188,8 @@ def main():
                 size=output_size, 
                 rotation=args.rotate,
                 global_frame_idx_offset=master_frame_counter,
-                frame_stride=args.frame_stride
+                frame_stride=args.frame_stride,
+                frames_bin_fh=frames_bin_fh
             )
             
             all_manifest_entries.extend(manifest_entries)
@@ -198,6 +208,9 @@ def main():
             elif num_frames_processed > 0: # If frames were processed from this file but it wasn't the first, ensure first_file_processed is false
                 first_file_processed = False
 
+    if frames_bin_fh:
+        frames_bin_fh.close()
+
     # After processing all GIFs/MP4s, write the manifest file
     if all_manifest_entries:
         manifest_path = os.path.join(args.output, 'manifest.txt')
@@ -212,7 +225,7 @@ def main():
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         run_command_file_path = os.path.join(script_dir, "run-command.txt")
-        command_to_write = f"python convert.py --source ./source --output ./output --size {output_size[0]} {output_size[1]} --rotate {args.rotate} --frame_stride {args.frame_stride}"
+        command_to_write = f"python convert.py --source ./source --output ./output --size {output_size[0]} {output_size[1]} --rotate {args.rotate} --frame_stride {args.frame_stride} --single-bin"
         with open(run_command_file_path, 'w') as rcf:
             rcf.write(command_to_write + '\n')
         print(f"Updated run command in: {run_command_file_path}")

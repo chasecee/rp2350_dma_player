@@ -64,4 +64,6 @@ target_link_libraries(rp2350_dma_player
 pico_enable_stdio_usb(rp2350_dma_player 1)
 pico_enable_stdio_uart(rp2350_dma_player 1)
 
-pico_add_extra_outputs(rp2350_dma_player) 
+pico_add_extra_outputs(rp2350_dma_player)
+
+# add_definitions(-DENABLE_DEBUG_PRINT) 

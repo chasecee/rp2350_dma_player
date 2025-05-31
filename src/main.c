@@ -8,6 +8,7 @@
 #include "bsp_co5300.h"      // CO5300 display driver
 #include "dma_config.h"      // Include the new DMA config header
 #include "sd_loader.h"       // Include the new SD loader module
+#include "debug.h"           // Add debug macro header
 // #include "palette_rgb565.h"  // No longer needed for direct RGB565 rendering
 
 // Display dimensions
@@ -51,8 +52,8 @@ void dma_done_callback(void)
 // Function to initialize precomputed scaling maps
 void init_scaling_maps(void)
 {
-    printf("Initializing scaling maps for %dx%d -> %dx%d...\n",
-           FRAME_WIDTH, FRAME_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    DBG_PRINTF("Initializing scaling maps for %dx%d -> %dx%d...\n",
+               FRAME_WIDTH, FRAME_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
     // Precompute source Y coordinates for each destination Y
     for (int i = 0; i < DISPLAY_HEIGHT; i++)
@@ -66,13 +67,13 @@ void init_scaling_maps(void)
         source_x_map[i] = (i * FRAME_WIDTH) / DISPLAY_WIDTH;
     }
 
-    printf("Scaling maps initialized.\n");
+    DBG_PRINTF("Scaling maps initialized.\n");
 }
 
 // Function to clear the entire physical screen to black
 void clear_entire_screen_to_black(void)
 {
-    printf("Clearing physical screen to black...\n");
+    DBG_PRINTF("Clearing physical screen to black...\n");
     bsp_co5300_set_window(0, 0, PHYSICAL_DISPLAY_WIDTH - 1, PHYSICAL_DISPLAY_HEIGHT - 1);
     bsp_co5300_prepare_for_frame_pixels();
 
@@ -96,13 +97,13 @@ void clear_entire_screen_to_black(void)
         sleep_us(0);
     }
     bsp_co5300_finish_frame_pixels();
-    printf("Physical screen cleared.\n");
+    DBG_PRINTF("Physical screen cleared.\n");
 }
 
 // Function to display a test pattern
 void display_test_pattern(void)
 {
-    printf("Displaying test pattern\n");
+    DBG_PRINTF("Displaying test pattern\n");
     bsp_co5300_set_window(0, 0, DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1);
     uint8_t test_pattern_line[DISPLAY_WIDTH]; // Changed to uint8_t
     for (int i = 0; i < DISPLAY_WIDTH; i++)
@@ -124,7 +125,7 @@ void display_test_pattern(void)
         sleep_us(0);
     } // Wait for last flush
     bsp_co5300_finish_frame_pixels();
-    printf("Test pattern displayed.\n");
+    DBG_PRINTF("Test pattern displayed.\n");
 }
 
 int main()
@@ -137,13 +138,13 @@ int main()
     // Check RP2350 datasheet & SDK docs for precise timing if issues arise.
     set_sys_clock_khz(150000, true); // <<< ADD THIS LINE
     sleep_ms(100);                   // Reduced from 2000ms - just enough for clock stability
-    printf("MAIN: System Initialized. Clock: %lu Hz\n", clock_get_hz(clk_sys));
+    DBG_PRINTF("MAIN: System Initialized. Clock: %lu Hz\n", clock_get_hz(clk_sys));
 
     // Initialize precomputed scaling maps
     init_scaling_maps();
 
     // Initialize Display (minimal parameters)
-    printf("MAIN: Initializing display...\n");
+    DBG_PRINTF("MAIN: Initializing display...\n");
     bsp_co5300_info_t display_info = {
         .width = PHYSICAL_DISPLAY_WIDTH,
         .height = PHYSICAL_DISPLAY_HEIGHT,
@@ -153,18 +154,18 @@ int main()
         .enabled_dma = true,
         .dma_flush_done_callback = dma_done_callback};
     bsp_co5300_init(&display_info);
-    printf("MAIN: Display initialized.\n");
+    DBG_PRINTF("MAIN: Display initialized.\n");
 
     // Clear the entire screen to black first
     // clear_entire_screen_to_black();  // COMMENTED OUT - unnecessary overhead for centered playback
 
     // Initialize SD DMA (must be done after display potentially claims DMA_IRQ_0)
-    printf("MAIN: Initializing general purpose DMA (formerly SD DMA)...\n");
+    DBG_PRINTF("MAIN: Initializing general purpose DMA (formerly SD DMA)...\n");
     init_sd_dma(); // This is now a general purpose DMA channel claimer
-    printf("MAIN: General purpose DMA initialized.\n");
+    DBG_PRINTF("MAIN: General purpose DMA initialized.\n");
 
     // --- SD CARD CODE ---
-    printf("MAIN: Initializing SD card...\n");
+    DBG_PRINTF("MAIN: Initializing SD card...\n");
     if (!sd_init_driver())
     {
         printf("ERROR: SD card initialization failed. Halting.\n");
@@ -173,7 +174,7 @@ int main()
             tight_loop_contents();
         }
     }
-    printf("MAIN: SD card mounted.\n");
+    DBG_PRINTF("MAIN: SD card mounted.\n");
     FATFS fs;
     FRESULT fr;
     fr = f_mount(&fs, "", 1);
@@ -186,52 +187,25 @@ int main()
         }
     }
 
-    printf("MAIN: Checking for animation frames...\n");
+    DBG_PRINTF("MAIN: Checking for animation frames...\n");
 
     int num_frames = 0;
-    FIL test_fil;
-    char test_filename[MAX_FILENAME_LEN];
-
-    // Try to open first frame to verify pattern start
-    snprintf(test_filename, MAX_FILENAME_LEN, "frame-%05d.bin", 0);
-    fr = f_open(&test_fil, test_filename, FA_READ);
+    FIL frames_bin_fil;
+    fr = f_open(&frames_bin_fil, "frames.bin", FA_READ);
     if (fr != FR_OK)
     {
-        printf("ERROR: Failed to open first frame %s. FR_CODE: %d\n", test_filename, fr);
+        printf("ERROR: Failed to open frames.bin. FR_CODE: %d\n", fr);
         while (true)
         {
             tight_loop_contents();
         }
     }
-    f_close(&test_fil);
+    // Get file size and compute number of frames
+    uint32_t frames_bin_size = f_size(&frames_bin_fil);
+    num_frames = frames_bin_size / (FRAME_WIDTH * FRAME_HEIGHT);
+    f_close(&frames_bin_fil);
 
-    // Try to open what we think is the last frame (based on manifest)
-    snprintf(test_filename, MAX_FILENAME_LEN, "frame-%05d.bin", 3402);
-    fr = f_open(&test_fil, test_filename, FA_READ);
-    if (fr != FR_OK)
-    {
-        printf("Scanning for last frame...\n");
-
-        // Scan backwards from 3402 to find the last valid frame
-        for (int i = 3401; i >= 0; i--)
-        {
-            snprintf(test_filename, MAX_FILENAME_LEN, "frame-%05d.bin", i);
-            fr = f_open(&test_fil, test_filename, FA_READ);
-            if (fr == FR_OK)
-            {
-                f_close(&test_fil);
-                num_frames = i + 1;
-                break;
-            }
-        }
-    }
-    else
-    {
-        f_close(&test_fil);
-        num_frames = 3403; // We found frame-03402.bin, so we have 3403 frames (0-3402)
-    }
-
-    printf("Found %d sequential frames.\n", num_frames);
+    DBG_PRINTF("Found %d frames in frames.bin.\n", num_frames);
 
     // Initialize the SD Loader module
     sd_loader_init(num_frames);
@@ -285,8 +259,8 @@ int main()
     // UINT bytes_read_for_full_frame; // Not needed with chunked loading this way
     // char current_frame_full_path[MAX_FILENAME_LEN + 8]; // Handled by sd_loader
 
-    printf("Starting 8-bit RGB332 animation loop (%d frames, %dx%d -> %dx%d).\n",
-           num_frames, FRAME_WIDTH, FRAME_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    DBG_PRINTF("Starting 8-bit RGB332 animation loop (%d frames, %dx%d -> %dx%d).\n",
+               num_frames, FRAME_WIDTH, FRAME_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
     // Pre-load first frame into buffer 0 - REMOVED (handled by sd_loader_process calls)
     // snprintf(current_frame_full_path, sizeof(current_frame_full_path), "output/%s", frame_filenames[0]);
@@ -301,30 +275,22 @@ int main()
     int display_frame_idx = 0;
     int display_buffer_idx = 0;
 
-    // Pre-calculate scaling lookup tables
-    uint32_t *y_offset_table = malloc(DISPLAY_HEIGHT * sizeof(uint32_t));
-    for (int y = 0; y < DISPLAY_HEIGHT; y++)
-    {
-        y_offset_table[y] = source_y_map[y] * FRAME_WIDTH;
-    }
-
-    // Allocate line buffer for scaled output
-    uint8_t *scaled_line_buffer = malloc(DISPLAY_WIDTH);
-    if (!scaled_line_buffer)
-    {
-        printf("Failed to allocate line buffer!\n");
-        while (1)
-            tight_loop_contents();
-    }
-
-    // No need for centering offsets since we're using full display
+    // 3x integer scaling: for each display pixel, use the corresponding input pixel at (y/3, x/3)
     const int x_offset = 0;
     const int y_offset = 0;
-
-    printf("Entering main display & loader loop (full resolution scaling)\n");
+    DBG_PRINTF("Entering main display & loader loop (3x integer scaling from 156x156 to 466x466)\n");
 
     absolute_time_t frame_start_time = get_absolute_time();
     const uint32_t target_frame_us = 33333; // Target ~30fps (33.333ms)
+
+    // Allocate a line buffer for the display
+    uint8_t *scaled_line_buffer = malloc(DISPLAY_WIDTH);
+    if (!scaled_line_buffer)
+    {
+        printf("Failed to allocate scaled line buffer!\n");
+        while (1)
+            tight_loop_contents();
+    }
 
     while (1)
     {
@@ -353,18 +319,16 @@ int main()
             // Get pointer to source frame
             uint8_t *src_buffer = frame_buffers[buffer_with_frame];
 
-            // Render frame with proper scaling - optimized inner loop
+            // 3x integer scaling: for each display line, fill from the corresponding input line
             for (int y = 0; y < DISPLAY_HEIGHT; y++)
             {
-                const uint32_t src_y_offset = y_offset_table[y];
-
-                // Scale each line
+                int src_y = y / 3;
+                uint8_t *src_line = &src_buffer[src_y * FRAME_WIDTH];
                 for (int x = 0; x < DISPLAY_WIDTH; x++)
                 {
-                    scaled_line_buffer[x] = src_buffer[src_y_offset + source_x_map[x]];
+                    int src_x = x / 3;
+                    scaled_line_buffer[x] = src_line[src_x];
                 }
-
-                // Output the scaled line
                 while (!dma_transfer_complete)
                     tight_loop_contents();
                 dma_transfer_complete = false;

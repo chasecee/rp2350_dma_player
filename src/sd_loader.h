@@ -3,6 +3,7 @@
 
 #include "pico/stdlib.h"
 #include "ff.h" // For FIL type
+#include "debug.h" // Add debug macro header
 
 // Configurable chunk size for reading from SD card
 // Must be a multiple of 512 (SD card sector size)
@@ -10,8 +11,8 @@
 #define SD_READ_CHUNK_SIZE 32768
 
 // These dimensions must match those used by the display logic in main.c
-#define FRAME_WIDTH 156  // Match main.c source frame size
-#define FRAME_HEIGHT 156 // Match main.c source frame size
+#define FRAME_WIDTH 156  // Match main.c source frame size (back to 156 for 3x scaling)
+#define FRAME_HEIGHT 156 // Match main.c source frame size (back to 156 for 3x scaling)
 
 // Maximum number of frame filenames the manifest reader can handle
 #define MAX_FRAMES_IN_MANIFEST 4000 // Updated to support 3.4k+ frames
@@ -29,7 +30,9 @@ extern volatile int target_frame_for_buffer[2];
 /**
  * @brief Initializes the SD card loader module.
  *
- * @param total_frames Total number of frames available
+ * Only supports loading from a single contiguous frames.bin file.
+ *
+ * @param total_frames Total number of frames available (computed from frames.bin size)
  */
 void sd_loader_init(int total_frames);
 
