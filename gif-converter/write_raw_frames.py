@@ -28,7 +28,9 @@ import re
 # SD card parameters
 RAW_START_SECTOR = 2048    # Start after partition table/boot sectors
 BYTES_PER_SECTOR = 512     # Standard SD sector size
-FRAME_SIZE_BYTES = 233 * 233 * 2  # 233x233 RGB565
+FRAME_SIZE_BYTES = 233 * 233 * 2  # 233x233 RGB565 (raw frame size)
+# Use sector-aligned frame size for optimal performance (must match convert.py and raw_sd_loader.c)
+PADDED_FRAME_SIZE_BYTES = ((FRAME_SIZE_BYTES + BYTES_PER_SECTOR - 1) // BYTES_PER_SECTOR) * BYTES_PER_SECTOR
 
 def get_device_info_macos(device_path):
     """Get device size using macOS diskutil command"""
@@ -96,11 +98,13 @@ def verify_frames_file(frames_path):
         raise FileNotFoundError(f"Frames file {frames_path} does not exist")
     
     file_size = os.path.getsize(frames_path)
-    if file_size % FRAME_SIZE_BYTES != 0:
-        print(f"WARNING: File size {file_size} is not evenly divisible by frame size {FRAME_SIZE_BYTES}")
+    if file_size % PADDED_FRAME_SIZE_BYTES != 0:
+        print(f"WARNING: File size {file_size} is not evenly divisible by padded frame size {PADDED_FRAME_SIZE_BYTES}")
+        print(f"Raw frame size: {FRAME_SIZE_BYTES}, Padded: {PADDED_FRAME_SIZE_BYTES}, Padding: {PADDED_FRAME_SIZE_BYTES - FRAME_SIZE_BYTES} bytes")
     
-    num_frames = file_size // FRAME_SIZE_BYTES
+    num_frames = file_size // PADDED_FRAME_SIZE_BYTES
     print(f"Found {num_frames} frames in {frames_path} ({file_size} bytes)")
+    print(f"Frame size: {FRAME_SIZE_BYTES} bytes raw, {PADDED_FRAME_SIZE_BYTES} bytes padded")
     return num_frames, file_size
 
 def write_raw_frames(device_path, frames_path, dry_run=False):
@@ -172,6 +176,8 @@ def write_raw_frames(device_path, frames_path, dry_run=False):
             f.write(f"start_sector={RAW_START_SECTOR}\n")
             f.write(f"num_frames={num_frames}\n")
             f.write(f"frame_size_bytes={FRAME_SIZE_BYTES}\n")
+            f.write(f"padded_frame_size_bytes={PADDED_FRAME_SIZE_BYTES}\n")
+            f.write(f"padding_per_frame={PADDED_FRAME_SIZE_BYTES - FRAME_SIZE_BYTES}\n")
             f.write(f"total_bytes={frames_size}\n")
         print(f"Metadata written to {metadata_path}")
         

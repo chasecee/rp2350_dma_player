@@ -106,10 +106,20 @@ def process_media_file(input_path, base_output_dir, size=(466, 466), rotation=0,
             raise ValueError(f"Unsupported color depth: {args.colors}")
 
         if frames_bin_fh:
-            frames_bin_fh.write(pixel_data_bytes)
+            # Pad to sector boundary for optimal SD card performance
             bytes_per_pixel = args.colors // 8
-            manifest_entry = f"frame-{current_global_frame_idx:05d} offset={current_global_frame_idx * (size[0] * size[1] * bytes_per_pixel)}"
-            print(f"Saved {color_mode_message} frame (original index {original_frame_idx}) to frames.bin (Global Processed Index: {current_global_frame_idx})")
+            frame_size_bytes = size[0] * size[1] * bytes_per_pixel
+            sector_size = 512
+            padded_frame_size = ((frame_size_bytes + sector_size - 1) // sector_size) * sector_size
+            padding_needed = padded_frame_size - frame_size_bytes
+            
+            frames_bin_fh.write(pixel_data_bytes)
+            if padding_needed > 0:
+                padding = bytes([0] * padding_needed)  # Pad with zeros
+                frames_bin_fh.write(padding)
+            
+            manifest_entry = f"frame-{current_global_frame_idx:05d} offset={current_global_frame_idx * padded_frame_size}"
+            print(f"Saved {color_mode_message} frame (original index {original_frame_idx}) to frames.bin (Global Processed Index: {current_global_frame_idx}, padded {padding_needed} bytes)")
         else:
             bin_filename = f"frame-{current_global_frame_idx:05d}.bin"
             out_path = os.path.join(base_output_dir, bin_filename)

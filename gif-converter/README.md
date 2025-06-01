@@ -1,68 +1,107 @@
+# GIF to Raw SD Card Animation Converter
+
+This toolchain converts GIFs/MP4s to sector-aligned binary frames and writes them directly to raw SD card sectors for maximum performance, completely bypassing the filesystem.
+
+## Setup
+
+```bash
 cd gif-converter
 python3 -m venv .venv
 source .venv/bin/activate
 pip install pillow imageio imageio-ffmpeg
+```
 
-diskutil list | grep -B3 -A3 "PICOSD"
-diskutil unmount /Volumes/PICOSD
-sudo diskutil eraseDisk FAT32 FRAMES MBRFormat /dev/disk6
+## SD Card Preparation
 
-# SD Card Formatting for Direct Offset-Seeking (macOS)
+1. **Find your SD card:**
 
-1. Find your SD card disk number:
-
-   ```sh
-   diskutil list | grep -B3 -A3 "PICOSD"
+   ```bash
+   diskutil list | grep -B3 -A3 "disk"
    ```
 
-   (Look for something like `/dev/disk6` and make sure it's your SD card!)
+   Look for your SD card (e.g., `/dev/disk6`)
 
-2. Unmount the SD card volume (replace `PICOSD` with your volume name if different):
+2. **Unmount if mounted:**
 
-   ```sh
-   diskutil unmount /Volumes/PICOSD
-   ```
-
-3. Erase and partition the SD card as FAT32 (this will nuke everything on it!):
-
-   ```sh
-   sudo diskutil eraseDisk FAT32 FRAMES MBRFormat /dev/disk6
-   ```
-
-   - `FRAMES` is the new volume label. Change it if you want to be extra.
-
-4. Unmount the new partition (macOS loves to auto-mount it):
-
-   ```sh
+   ```bash
    diskutil unmount /dev/disk6s1
    ```
 
-5. (Optional but recommended) Reformat with a big cluster size for fast sequential access:
+3. **Note:** No filesystem formatting needed! We write directly to raw sectors.
 
-   ```sh
-   sudo newfs_msdos -F 32 -c 64 -v FRAMES /dev/disk6s1
-   ```
+## Complete Workflow
 
-   - `-c 64` gives you 32KB clusters. Perfect for frame streaming.
+### Step 1: Convert to Sector-Aligned Frames
 
-6. Remount the SD card (or just unplug/replug if you want macOS to do it for you).
-   ```sh
-   diskutil mount /dev/disk6s1
-   ls /Volumes
-   ```
-
-# Usage: Convert and Copy
-
-To output all frames into a single file for direct offset-seeking:
-
-```sh
-python convert.py --source ./source --output /Volumes/FRAMES --size 156 --rotate -90 --frame_stride 2 --single-bin
+```bash
+python convert.py --source ./source --output ./output --size 233 233 --rotate -90 --frame_stride 2 --single-bin --colors 16
 ```
 
-- This will create `/Volumes/FRAMES/frames.bin` and a `manifest.txt` for debugging.
+**Parameters:**
 
-If you want the old behavior (individual .bin files), just leave off `--single-bin`.
+- `--size 233 233`: Native frame resolution (will be scaled 2x to 466x466)
+- `--rotate -90`: Rotate frames (0, 90, 180, -90)
+- `--frame_stride 2`: Use every 2nd frame (reduces file size)
+- `--single-bin`: Output one `frames.bin` file with sector padding
+- `--colors 16`: 16-bit RGB565 format
 
-# Straight to sd card
+This creates:
 
-python convert.py --source ./source --output /Volumes/PICOSD --size 156 --rotate -90 --frame_stride 2
+- `./output/frames.bin` - Sector-aligned binary frames
+- `./output/manifest.txt` - Frame offset information
+- `master_thumbnail.jpg` - Preview of first frame
+
+### Step 2: Write to Raw SD Card Sectors
+
+```bash
+sudo python3 write_raw_frames.py /dev/rdisk6 ./output/frames.bin
+```
+
+**Important:**
+
+- Use `/dev/rdisk6` (not `/dev/disk6`) for faster raw access
+- Writes starting at sector 2048 (after partition table)
+- Each frame is padded to 213 sectors (109,056 bytes) for optimal performance
+
+### Step 3: Verify the Write
+
+```bash
+sudo python3 verify_raw_frames.py /dev/rdisk6 ./output/frames.bin
+```
+
+This reads back the data and verifies byte-for-byte accuracy.
+
+### Step 4: Update Firmware Frame Count
+
+Update `src/main.c` with the actual frame count:
+
+```c
+num_frames = 3403; // Use the number reported by convert.py
+```
+
+### Step 5: Test on Device
+
+Insert SD card into your RP2350 device and test!
+
+## Performance Benefits
+
+✅ **Sector-aligned frames** - No partial sector reads  
+✅ **Raw device access** - Bypasses filesystem overhead  
+✅ **Optimal clustering** - 213 sectors per frame (clean sector math)  
+✅ **DMA-friendly** - Large contiguous reads  
+✅ **Memory efficient** - 233x233 frames scale to 466x466 display
+
+## Technical Details
+
+- **Frame data starts:** Sector 2048 (1MB offset)
+- **Raw frame size:** 108,578 bytes (233×233×2)
+- **Padded frame size:** 109,056 bytes (213 sectors)
+- **Padding per frame:** 478 bytes
+- **SD read size:** 128 sectors per chunk (64KB)
+
+## Troubleshooting
+
+- **Permission denied:** Make sure to use `sudo` for raw device access
+- **Device not found:** Check `diskutil list` for correct device path
+- **Verification failed:** Re-run the write process, SD card may be faulty
+- **Display artifacts:** Ensure frame count in firmware matches convert.py output

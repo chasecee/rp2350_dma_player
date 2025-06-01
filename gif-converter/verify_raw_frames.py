@@ -24,7 +24,9 @@ import re
 # SD card parameters (must match write_raw_frames.py)
 RAW_START_SECTOR = 2048
 BYTES_PER_SECTOR = 512
-FRAME_SIZE_BYTES = 233 * 233 * 2
+FRAME_SIZE_BYTES = 233 * 233 * 2  # 233x233 RGB565 (raw frame size)
+# Use sector-aligned frame size for optimal performance (must match convert.py and raw_sd_loader.c)
+PADDED_FRAME_SIZE_BYTES = ((FRAME_SIZE_BYTES + BYTES_PER_SECTOR - 1) // BYTES_PER_SECTOR) * BYTES_PER_SECTOR
 
 def get_device_info_macos(device_path):
     """Get device size using macOS diskutil command"""
@@ -58,8 +60,13 @@ def verify_raw_frames(device_path, frames_path):
         raise FileNotFoundError(f"Original frames file {frames_path} does not exist")
     
     frames_size = os.path.getsize(frames_path)
-    num_frames = frames_size // FRAME_SIZE_BYTES
+    num_frames = frames_size // PADDED_FRAME_SIZE_BYTES
     print(f"Original file: {num_frames} frames ({frames_size:,} bytes)")
+    print(f"Frame size: {FRAME_SIZE_BYTES} bytes raw, {PADDED_FRAME_SIZE_BYTES} bytes padded")
+    print(f"Padding per frame: {PADDED_FRAME_SIZE_BYTES - FRAME_SIZE_BYTES} bytes")
+    
+    if frames_size % PADDED_FRAME_SIZE_BYTES != 0:
+        print(f"WARNING: File size {frames_size} is not evenly divisible by padded frame size {PADDED_FRAME_SIZE_BYTES}")
     
     # Check device
     if not os.path.exists(device_path):

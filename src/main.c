@@ -220,10 +220,14 @@ int main()
     int display_frame_idx = 0;
     int display_buffer_idx = 0;
 
-    // Native 233x233 display - no scaling needed, just center on 466x466 display
+    // Calculate display offsets - used for native mode centering
     const int x_offset = (PHYSICAL_DISPLAY_WIDTH - DISPLAY_WIDTH) / 2;   // Center horizontally
     const int y_offset = (PHYSICAL_DISPLAY_HEIGHT - DISPLAY_HEIGHT) / 2; // Center vertically
+#if NATIVE_OUTPUT
     DBG_PRINTF("Entering main display & loader loop (native 233x233 centered on 466x466)\n");
+#else
+    DBG_PRINTF("Entering main display & loader loop (scaled 233x233 -> 466x466 fullscreen)\n");
+#endif
 
     absolute_time_t frame_start_time = get_absolute_time();
     const uint32_t target_frame_us = 33333; // Target ~30fps (33.333ms)
@@ -234,18 +238,9 @@ int main()
     uint32_t frame_counter = 0;
     absolute_time_t profile_start;
 
-    // Allocate line buffer for the display
-    uint16_t *scaled_line_buffer = malloc(DISPLAY_WIDTH * sizeof(uint16_t));
-    if (!scaled_line_buffer)
-    {
-        printf("Failed to allocate line buffer!\n");
-        while (1)
-            tight_loop_contents();
-    }
-
-// For native display, use moderate multi-line buffer - large batches cause display duplication
-// The display controller misinterprets large DMA transfers as wide single lines
-#define LINES_PER_DMA 233 // Better division: 7 batches of 31 + 1 batch of 16 (instead of 4×58 + 1×1)
+    // For native display, use moderate multi-line buffer - large batches cause display duplication
+#if NATIVE_OUTPUT
+#define LINES_PER_DMA 233 // Native mode: process all lines at once
     uint16_t *multi_line_buffer = malloc(DISPLAY_WIDTH * LINES_PER_DMA * sizeof(uint16_t));
     if (!multi_line_buffer)
     {
@@ -253,6 +248,17 @@ int main()
         while (1)
             tight_loop_contents();
     }
+#else
+// Scaled mode: use smaller line-based buffer to conserve memory
+#define SCALED_LINES_PER_BATCH 2 // Process just 2 lines at a time to minimize memory
+    uint16_t *display_line_buffer = malloc(DISPLAY_WIDTH * SCALED_LINES_PER_BATCH * sizeof(uint16_t));
+    if (!display_line_buffer)
+    {
+        printf("Failed to allocate display line buffer!\n");
+        while (1)
+            tight_loop_contents();
+    }
+#endif
 
     while (1)
     {
@@ -274,16 +280,18 @@ int main()
 
         if (buffer_to_display >= 0)
         {
+            DBG_PRINTF("MAIN: Displaying frame %d from buffer %d\n", display_frame_idx, buffer_to_display);
+
             profile_start = get_absolute_time();
 
-            // Set up display window for centered 233x233 content
+#if NATIVE_OUTPUT
+            // Native 233x233 mode - center on display
             bsp_co5300_set_window(x_offset, y_offset,
                                   x_offset + DISPLAY_WIDTH - 1,
                                   y_offset + DISPLAY_HEIGHT - 1);
             bsp_co5300_prepare_for_frame_pixels();
 
-            // Native display - direct copy, no scaling or byte swapping needed
-            // Use batched DMA transfers for efficiency
+            // Direct copy - no scaling needed
             int lines_processed = 0;
 
             for (int batch_start = 0; batch_start < DISPLAY_HEIGHT; batch_start += LINES_PER_DMA)
@@ -324,6 +332,60 @@ int main()
                                  DISPLAY_WIDTH * lines_in_batch * sizeof(uint16_t));
                 lines_processed += lines_in_batch;
             }
+#else
+            // Scaled 466x466 mode - 2x2 pixel scaling with memory-efficient batching
+
+            // Set up display window once for the entire frame
+            bsp_co5300_set_window(0, 0, DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1);
+            bsp_co5300_prepare_for_frame_pixels();
+
+            // Process frame in batches to conserve memory
+            for (int batch_start = 0; batch_start < DISPLAY_HEIGHT; batch_start += SCALED_LINES_PER_BATCH)
+            {
+                int lines_in_batch = SCALED_LINES_PER_BATCH;
+                if (batch_start + lines_in_batch > DISPLAY_HEIGHT)
+                    lines_in_batch = DISPLAY_HEIGHT - batch_start;
+
+                // Clear the batch buffer
+                memset(display_line_buffer, 0, DISPLAY_WIDTH * lines_in_batch * sizeof(uint16_t));
+
+                // Scale source lines into this batch
+                for (int batch_line = 0; batch_line < lines_in_batch; batch_line++)
+                {
+                    int dst_y = batch_start + batch_line;
+                    int src_y = dst_y / 2; // Scale factor of 2
+
+                    uint16_t *dst_line = &display_line_buffer[batch_line * DISPLAY_WIDTH];
+
+                    // Only process if we have valid source data
+                    if (src_y < FRAME_HEIGHT)
+                    {
+                        uint16_t *src_line = &frame_buffers[buffer_to_display][src_y * FRAME_WIDTH];
+
+                        // Scale horizontally: each source pixel becomes 2 destination pixels
+                        for (int src_x = 0; src_x < FRAME_WIDTH; src_x++)
+                        {
+                            uint16_t pixel = src_line[src_x];
+                            int dst_x = src_x * 2;
+
+                            // Write the 2 horizontal pixels
+                            if (dst_x < DISPLAY_WIDTH)
+                                dst_line[dst_x] = pixel;
+                            if (dst_x + 1 < DISPLAY_WIDTH)
+                                dst_line[dst_x + 1] = pixel;
+                        }
+                    }
+                    // If src_y >= FRAME_HEIGHT, line remains black (from memset)
+                }
+
+                // Send this batch - continuous stream, no window reset
+                while (!dma_transfer_complete)
+                    tight_loop_contents();
+                dma_transfer_complete = false;
+                bsp_co5300_flush((uint8_t *)display_line_buffer,
+                                 DISPLAY_WIDTH * lines_in_batch * sizeof(uint16_t));
+            }
+#endif
 
             // Wait for the last DMA transfer to complete
             while (!dma_transfer_complete)
@@ -342,6 +404,7 @@ int main()
 
             // Advance to next display frame
             display_frame_idx = next_frame;
+            DBG_PRINTF("MAIN: Advanced to frame %d (next target: %d)\n", display_frame_idx, frame_after_next);
 
             // Frame timing control
             absolute_time_t now = get_absolute_time();
