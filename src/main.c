@@ -417,15 +417,21 @@ int main()
                            frame_counter, sd_load_time_us, display_time_us, frame_time, target_frame_us);
             }
 
-            // Improved frame timing - only sleep if we're significantly ahead of schedule
-            if (frame_time < (target_frame_us - 1000)) // Leave 1ms buffer for timing precision
+            // More consistent frame timing - always try to maintain steady framerate
+            int64_t sleep_time = target_frame_us - frame_time;
+            if (sleep_time > 1000) // Only sleep if we have at least 1ms to spare
             {
-                // We rendered faster than target frame time, sleep for remainder
-                uint32_t sleep_time = target_frame_us - frame_time - 500; // Leave 500us buffer
-                if (sleep_time > 0 && sleep_time < target_frame_us)
+                // Sleep for most of the remaining time, but leave some buffer for timing precision
+                uint32_t actual_sleep = sleep_time - 800; // Leave 800us buffer for system overhead
+                if (actual_sleep > 0 && actual_sleep < target_frame_us)
                 {
-                    sleep_us(sleep_time);
+                    sleep_us(actual_sleep);
                 }
+            }
+            else if (sleep_time < -1000) // Frame took too long
+            {
+                // Frame overran - just start timing for next frame immediately
+                // Don't try to "catch up" as that can cause more stuttering
             }
 
             frame_start_time = get_absolute_time(); // Start timing for next frame

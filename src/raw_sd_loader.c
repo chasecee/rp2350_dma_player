@@ -42,10 +42,12 @@ static struct
 } raw_loader_state;
 
 // Track timing for adaptive loading
+#ifdef ENABLE_DEBUG_PRINT
 static uint32_t last_frame_load_time = 0;
 static uint32_t avg_load_time = 0;
 static uint32_t frame_count = 0;
 static uint32_t read_start_time = 0; // Track when each read starts for timeout detection
+#endif
 
 void raw_sd_loader_init(int total_frames)
 {
@@ -181,11 +183,14 @@ void raw_sd_loader_process(void)
     DBG_PRINTF("RAW_SD_LOADER: Reading %u sectors from %lu into temp buffer\n",
                sectors_to_read, raw_loader_state.current_sector_offset);
 
+#ifdef ENABLE_DEBUG_PRINT
     // Record start time for timeout detection
     read_start_time = to_us_since_boot(get_absolute_time()) / 1000; // Convert to ms
+#endif
 
     DRESULT dr = disk_read(0, sector_buffer, raw_loader_state.current_sector_offset, sectors_to_read);
 
+#ifdef ENABLE_DEBUG_PRINT
     uint32_t read_end_time = to_us_since_boot(get_absolute_time()) / 1000;
     uint32_t read_duration = read_end_time - read_start_time;
 
@@ -195,6 +200,7 @@ void raw_sd_loader_process(void)
                    read_duration, raw_loader_state.current_sector_offset,
                    raw_loader_state.current_sector_offset + sectors_to_read - 1);
     }
+#endif
 
     if (dr != RES_OK)
     {
@@ -237,21 +243,31 @@ void raw_sd_loader_process(void)
         raw_loader_state.current_buffer_idx = -1;
         raw_loader_state.current_frame_to_load_idx = -1;
 
+#ifdef ENABLE_DEBUG_PRINT
         uint32_t end_time = to_us_since_boot(get_absolute_time());
         uint32_t load_time = (end_time - start_time) / 1000; // Convert to milliseconds
         last_frame_load_time = load_time;
 
-        if (frame_count < 10)
+        // Use consistent rolling average instead of switching behavior after 10 frames
+        if (frame_count == 0)
         {
+            avg_load_time = load_time;
+        }
+        else if (frame_count < 50)
+        {
+            // For the first 50 frames, use true average for better accuracy
             avg_load_time = ((avg_load_time * frame_count) + load_time) / (frame_count + 1);
-            frame_count++;
         }
         else
         {
+            // After 50 frames, use rolling average with 90% weight on history
             avg_load_time = (avg_load_time * 9 + load_time) / 10;
         }
+        frame_count++;
+
         DBG_PRINTF("RAW_SD_LOADER: B%d loaded frame %d took %lu ms. Avg: %lu ms.\n",
                    buffer_to_load, successfully_loaded_frame, load_time, avg_load_time);
+#endif
     }
 }
 
