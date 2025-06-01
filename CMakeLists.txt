@@ -31,8 +31,13 @@ pico_sdk_init()
 add_subdirectory(libraries/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/src)
 
 add_executable(rp2350_dma_player
-    src/main.c
+    src/main_clean.c
+    # src/main.c  # Old monolithic version - comment out for now
     src/raw_sd_loader.c
+    src/display_manager.c
+    src/display_native.c
+    src/display_scaled.c
+    src/frame_loader.c
     hw_config.c
     libraries/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/src/sd_driver/SPI/sd_spi.c
     libraries/bsp/bsp_cd5300.c

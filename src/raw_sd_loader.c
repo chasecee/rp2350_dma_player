@@ -15,7 +15,7 @@
 #endif
 
 #define FRAME_SIZE_BYTES (FRAME_HEIGHT * FRAME_WIDTH * 2) // Size of one frame in bytes
-#define CHUNK_SIZE_SECTORS 256                            // Read 128 sectors (64KB) at once
+#define CHUNK_SIZE_SECTORS 64                             // Read 32 sectors (16KB) at once - reduced from 256 to save RAM
 #define BYTES_PER_SECTOR 512                              // Standard SD sector size
 
 // Raw SD card parameters - use sector-aligned frame size for optimal performance
